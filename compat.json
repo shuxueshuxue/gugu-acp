@@ -11,8 +11,28 @@
           "upstreamTag": "v0.81.1",
           "cliFrom": "2.1.278",
           "verified": [
-            { "cli": "2.1.278", "at": "2026-09-24", "how": "abc (acp-repro A/B/C, Windows, build = patches on v0.81.1)" },
-            { "cli": "2.1.281", "at": "2026-09-25", "how": "product A/B on mac1, gugu#6449 vs dev (evidence: gugu-base evidence/2026-09-25-6394-claude-bridge-ab)" }
+            {
+              "cli": "2.1.278",
+              "at": "2026-09-24",
+              "how": "abc (acp-repro A/B/C, Windows, build = patches on v0.81.1)"
+            },
+            {
+              "cli": "2.1.281",
+              "at": "2026-09-25",
+              "how": "product A/B on mac1, gugu#6449 vs dev (evidence: gugu-base evidence/2026-09-25-6394-claude-bridge-ab)"
+            }
+          ]
+        },
+        {
+          "version": "1.1.0",
+          "upstreamTag": "v0.81.2",
+          "cliFrom": "2.1.282",
+          "verified": [
+            {
+              "cli": "2.1.282",
+              "at": "2026-09-25",
+              "how": "abc (CI, upstream v0.81.2)"
+            }
           ]
         }
       ]
