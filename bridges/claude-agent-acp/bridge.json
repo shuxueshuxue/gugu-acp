@@ -1,0 +1,16 @@
+{
+  "package": "@gugu-acp/claude-agent-acp",
+  "version": "1.0.0",
+  "upstream": {
+    "repo": "https://github.com/agentclientprotocol/claude-agent-acp",
+    "package": "@agentclientprotocol/claude-agent-acp",
+    "tag": "v0.81.1",
+    "commit": "b264b52bee80e49f20caf1941f7d7cb89edb80c4"
+  },
+  "cli": {
+    "name": "claude",
+    "npm": "@anthropic-ai/claude-code"
+  },
+  "build": ["npm ci", "npm run build"],
+  "test": ["npx vitest run"]
+}

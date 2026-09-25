@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "note": "Which Gugu bridge build serves which CLI version. Written by us from our own runs; upstream's claudeCodeVersion is only a starting point. Per bridge, releases are ordered by cliFrom: a release serves [its cliFrom, the next release's cliFrom); the newest release is open-ended. `verified` lists the CLI versions we actually ran the ABC check (or a product A/B) against.",
+  "bridges": {
+    "claude-agent-acp": {
+      "package": "@gugu-acp/claude-agent-acp",
+      "cli": "claude",
+      "releases": [
+        {
+          "version": "1.0.0",
+          "upstreamTag": "v0.81.1",
+          "cliFrom": "2.1.278",
+          "verified": [
+            { "cli": "2.1.278", "at": "2026-09-24", "how": "abc (acp-repro A/B/C, Windows, build = patches on v0.81.1)" },
+            { "cli": "2.1.281", "at": "2026-09-25", "how": "product A/B on mac1, gugu#6449 vs dev (evidence: gugu-base evidence/2026-09-25-6394-claude-bridge-ab)" }
+          ]
+        }
+      ]
+    }
+  }
+}

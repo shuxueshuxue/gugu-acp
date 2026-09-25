@@ -1,0 +1,22 @@
+name: ci
+# Every change to a bridge's patches or pin: the patches must still apply, build, and pass
+# upstream's tests (which carry our patch tests). No secrets; runs on PRs too.
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  bridges:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bridge: [claude-agent-acp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/build.mjs ${{ matrix.bridge }}

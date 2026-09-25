@@ -1,0 +1,36 @@
+name: follow
+# Unattended: follow upstream releases and new CLI versions (scripts/follow.mjs).
+# A new upstream tag -> patches + build + tests + ABC -> publish + compat add-release.
+# A new CLI version  -> ABC against our newest release -> compat record-verified.
+# Failures open (or comment on) an issue; nothing is published or recorded before every check passed.
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: follow
+  cancel-in-progress: false
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        bridge: [claude-agent-acp]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      ANTHROPIC_BASE_URL: ${{ secrets.ABC_ANTHROPIC_BASE_URL }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ABC_ANTHROPIC_AUTH_TOKEN }}
+      ANTHROPIC_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
+      ANTHROPIC_SMALL_FAST_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/follow.mjs ${{ matrix.bridge }}
