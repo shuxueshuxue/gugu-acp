@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: '17 */6 * * *'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run every check but do not publish, commit or push'
+        type: boolean
+        default: false
 permissions:
   contents: write
   issues: write
@@ -33,4 +38,4 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: node scripts/follow.mjs ${{ matrix.bridge }}
+      - run: node scripts/follow.mjs ${{ matrix.bridge }} ${{ inputs.dry_run && '--dry-run' || '' }}
