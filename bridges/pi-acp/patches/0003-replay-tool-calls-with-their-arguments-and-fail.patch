@@ -1,0 +1,135 @@
+From 0ff45a9c634a5dddd396d32a6c0c73110501a362 Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 11:52:27 +0800
+Subject: [PATCH 3/3] gugu: replay tool calls with their arguments and failure
+ status on session/load
+
+Why: on session/load pi-acp replays history, but a toolResult message holds
+only the output; the call's arguments are on the assistant message's toolCall
+block with the same id. The adapter dropped them (rawInput: null, bash titles
+fell back to the tool name) and marked every replayed call completed, so
+reopened sessions showed tool calls without what ran and without failures
+(Gugu #6020). Keep the arguments by call id and carry isError into status.
+
+Upstream: none yet.
+
+Drop when: upstream replays toolCall arguments and failure status.
+---
+ src/acp/agent.ts                              | 18 ++++++--
+ .../component/session-load-toolresult.test.ts | 45 +++++++++++++++++++
+ 2 files changed, 59 insertions(+), 4 deletions(-)
+
+diff --git a/src/acp/agent.ts b/src/acp/agent.ts
+index 5d8818a..bb6af0a 100644
+--- a/src/acp/agent.ts
++++ b/src/acp/agent.ts
+@@ -1026,6 +1026,9 @@ export class PiAcpAgent implements ACPAgent {
+     // Replay full conversation history.
+     const data = (await proc.getMessages()) as any
+     const messages = Array.isArray(data?.messages) ? data.messages : []
++    // A toolResult message carries only the output; the call's arguments live on the assistant
++    // message's toolCall block with the same id. Keep them so replayed tool calls show what ran.
++    const toolInputs = new Map<string, unknown>()
+ 
+     for (const m of messages) {
+       const role = String(m?.role ?? '')
+@@ -1044,6 +1047,11 @@ export class PiAcpAgent implements ACPAgent {
+       }
+ 
+       if (role === 'assistant') {
++        for (const block of Array.isArray(m?.content) ? m.content : []) {
++          if (block?.type === 'toolCall' && typeof block.id === 'string') {
++            toolInputs.set(block.id, block.arguments)
++          }
++        }
+         const text = normalizePiAssistantText(m?.content)
+         if (text) {
+           await this.conn.sessionUpdate({
+@@ -1059,6 +1067,7 @@ export class PiAcpAgent implements ACPAgent {
+       if (role === 'toolResult') {
+         const toolName = String((m as any)?.toolName ?? 'tool')
+         const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
++        const toolInput = toolInputs.get(toolCallId)
+         const isError = Boolean((m as any)?.isError)
+         const isBash = isBashTool(toolName)
+ 
+@@ -1069,9 +1078,10 @@ export class PiAcpAgent implements ACPAgent {
+             update: {
+               sessionUpdate: 'tool_call',
+               toolCallId,
+-              title: bashCommand(m) ?? toolName,
++              title: bashCommand(toolInput) ?? bashCommand(m) ?? toolName,
+               kind: 'execute',
+-              status: 'completed',
++              status: isError ? 'failed' : 'completed',
++              rawInput: toolInput ?? null,
+               content: bashTerminalContent(toolCallId),
+               _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
+             }
+@@ -1100,8 +1110,8 @@ export class PiAcpAgent implements ACPAgent {
+             toolCallId,
+             title: toolName,
+             kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
+-            status: 'completed',
+-            rawInput: null,
++            status: isError ? 'failed' : 'completed',
++            rawInput: toolInput ?? null,
+             rawOutput: m
+           }
+         })
+diff --git a/test/component/session-load-toolresult.test.ts b/test/component/session-load-toolresult.test.ts
+index 6c11768..7f0a493 100644
+--- a/test/component/session-load-toolresult.test.ts
++++ b/test/component/session-load-toolresult.test.ts
+@@ -66,3 +66,48 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
+     PiRpcProcess.spawn = originalSpawn
+   }
+ })
++
++test('PiAcpAgent: loadSession takes replayed tool arguments from the assistant toolCall with the same id', async () => {
++  const originalSpawn = PiRpcProcess.spawn
++  ;(PiRpcProcess as any).spawn = async () => {
++    return {
++      onEvent: () => () => {},
++      getMessages: async () => ({
++        messages: [
++          {
++            role: 'assistant',
++            content: [
++              { type: 'toolCall', id: 'call_bash', name: 'bash', arguments: { command: 'ls -la' } },
++              { type: 'toolCall', id: 'call_read', name: 'read', arguments: { path: 'README.md' } }
++            ]
++          },
++          // pi's toolResult carries only the output, not the call's arguments.
++          { role: 'toolResult', toolCallId: 'call_bash', toolName: 'bash', content: [{ type: 'text', text: 'x' }], isError: true },
++          { role: 'toolResult', toolCallId: 'call_read', toolName: 'read', content: [{ type: 'text', text: 'y' }], isError: false }
++        ]
++      }),
++      getAvailableThinkingLevels: async () => ['medium'],
++      getAvailableModels: async () => ({ models: [] }),
++      getState: async () => ({ thinkingLevel: 'medium' })
++    } as any
++  }
++
++  try {
++    const conn = new FakeAgentSideConnection()
++    const agent = new PiAcpAgent(asAgentConn(conn))
++    ;(agent as any).store = new FakeStore()
++
++    await agent.loadSession({ sessionId: 's1', cwd: '/tmp/project', mcpServers: [] } as any)
++
++    const calls = conn.updates.map(u => (u as any).update).filter(u => u?.sessionUpdate === 'tool_call')
++    const bash = calls.find(u => u.toolCallId === 'call_bash')
++    assert.equal(bash.title, 'ls -la')
++    assert.deepEqual(bash.rawInput, { command: 'ls -la' })
++    assert.equal(bash.status, 'failed')
++    const read = calls.find(u => u.toolCallId === 'call_read')
++    assert.deepEqual(read.rawInput, { path: 'README.md' })
++    assert.equal(read.status, 'completed')
++  } finally {
++    PiRpcProcess.spawn = originalSpawn
++  }
++})
+-- 
+2.41.0.windows.1
+

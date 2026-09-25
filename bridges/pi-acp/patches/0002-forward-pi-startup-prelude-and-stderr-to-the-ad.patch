@@ -1,0 +1,55 @@
+From d0d7b449c03ef4d88adf0fe323e148be5ea2118c Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 11:51:24 +0800
+Subject: [PATCH 2/3] gugu: forward pi startup prelude and stderr to the
+ adapter's stderr
+
+Why: pi reports extension load failures and other startup diagnostics on
+stderr (and a human-readable prelude on stdout); the adapter swallowed both,
+so an ACP host that records adapter stderr saw only 'connection closed' when
+pi failed to start. Forwarding them keeps the ACP conversation clean
+(quietStartup still hides the synthetic banner) while making the real cause
+visible to the host.
+
+Upstream: none yet.
+
+Drop when: upstream forwards pi's stderr/prelude to the adapter stderr.
+---
+ src/pi-rpc/process.ts | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/src/pi-rpc/process.ts b/src/pi-rpc/process.ts
+index 3cd1957..2abc0ba 100644
+--- a/src/pi-rpc/process.ts
++++ b/src/pi-rpc/process.ts
+@@ -125,7 +125,13 @@ export class PiRpcProcess {
+         // pi may emit a human-readable prelude on stdout before NDJSON starts.
+         // Capture it so the ACP adapter can surface it on session start.
+         const cleaned = stripAnsi(String(line)).trimEnd()
+-        if (cleaned) this.preludeLines.push(cleaned)
++        if (cleaned) {
++          this.preludeLines.push(cleaned)
++          // Also route pi's real startup diagnostics to the adapter's stderr, which ACP hosts
++          // record; quietStartup still suppresses the synthetic banner in the conversation.
++          process.stderr.write(`${cleaned}
++`)
++        }
+         return
+       }
+ 
+@@ -207,8 +213,10 @@ export class PiRpcProcess {
+       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
+     }
+ 
+-    child.stderr.on('data', () => {
+-      // leave stderr untouched; ACP clients may capture it.
++    child.stderr.on('data', (data: Buffer) => {
++      // pi writes extension load failures and other diagnostics to stderr: forward them to the
++      // adapter's stderr so the ACP host can capture them (they were dropped before).
++      process.stderr.write(data)
+     })
+ 
+     const proc = new PiRpcProcess(child)
+-- 
+2.41.0.windows.1
+

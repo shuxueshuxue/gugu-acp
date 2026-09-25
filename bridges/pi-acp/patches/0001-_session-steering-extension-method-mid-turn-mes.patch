@@ -1,0 +1,299 @@
+From 46e31e4f3f10c73059e4b094ab22bd3cffa6b333 Mon Sep 17 00:00:00 2001
+From: David Sutton <davidhsutton@outlook.com>
+Date: Thu, 20 Aug 2026 11:00:59 +0000
+Subject: [PATCH 1/3] gugu: _session/steering extension method (mid-turn
+ message injection)
+
+Adds an ACP extension method with the same name and contract as
+@agentclientprotocol/claude-agent-acp's, so clients can inject a message into
+the RUNNING turn via pi's native `steer` RPC instead of waiting for the turn
+boundary: injected (turn running) / promptRequired + noRunningTurn (idle,
+client opted in via _meta.steering.idleBehavior) / startedNewTurn (idle).
+initialize() advertises _meta.steering.supported = true.
+
+Why: Gugu delivers group messages that arrive mid-turn this way.
+
+Upstream: svkozak/pi-acp#115 (head d7f9cb2, cherry-picked unchanged: its two
+commits squashed).
+
+Drop when: #115 (or an equivalent) is in the upstream tag this is built on.
+---
+ src/acp/agent.ts            |  46 +++++++++++++-
+ src/acp/session.ts          |   6 ++
+ src/pi-rpc/process.ts       |  11 ++++
+ test/agent-steering.test.ts | 122 ++++++++++++++++++++++++++++++++++++
+ test/helpers/fakes.ts       |   5 ++
+ 5 files changed, 189 insertions(+), 1 deletion(-)
+ create mode 100644 test/agent-steering.test.ts
+
+diff --git a/src/acp/agent.ts b/src/acp/agent.ts
+index f3ce031..5d8818a 100644
+--- a/src/acp/agent.ts
++++ b/src/acp/agent.ts
+@@ -21,7 +21,8 @@ import {
+   type SetSessionModeResponse,
+   type StopReason,
+   type DeleteSessionRequest,
+-  type DeleteSessionResponse
++  type DeleteSessionResponse,
++  type ContentBlock
+ } from '@agentclientprotocol/sdk'
+ import { getAuthMethods } from './auth.js'
+ import { SessionManager, type PiAcpSession } from './session.js'
+@@ -233,6 +234,46 @@ export class PiAcpAgent implements ACPAgent {
+     }
+   }
+ 
++  // ACP extension method (SDK routes unknown `_session/*` requests here).
++  // Implements the `_session/steering` contract (same method name as
++  // @agentclientprotocol/claude-agent-acp): inject a message into the RUNNING
++  // turn via pi's native `steer` RPC (delivered before the next LLM call) and
++  // answer `injected`; when idle, either report `promptRequired` (client opted
++  // in via _meta and will redeliver the text as a trackable `session/prompt`)
++  // or start a new turn fire-and-forget. NOTE: unrelated to pi's `/steering`
++  // slash command (queue delivery mode).
++  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
++    if (method === '_session/steering') {
++      const sessionId = params.sessionId
++      if (typeof sessionId !== 'string' || !sessionId) {
++        throw RequestError.invalidParams('_session/steering requires a sessionId')
++      }
++
++      const session = await this.restoreSession(sessionId)
++      const prompt = (Array.isArray(params.prompt) ? params.prompt : []) as ContentBlock[]
++      const { message, images } = promptToPiMessage(prompt)
++
++      if (!session.hasPendingTurn) {
++        const meta = params._meta as { steering?: { idleBehavior?: string } } | undefined
++        if (meta?.steering?.idleBehavior === 'promptRequired') {
++          return { outcome: 'promptRequired', reason: 'noRunningTurn' }
++        }
++        // Fire-and-forget: the steering response must not block on a whole turn.
++        this.prompt({ sessionId, prompt }).catch(() => {})
++        return { outcome: 'startedNewTurn' }
++      }
++
++      try {
++        await session.proc.steer(message, images)
++      } catch (e) {
++        throw RequestError.internalError({}, String((e as Error)?.message ?? e))
++      }
++      return { outcome: 'injected' }
++    }
++
++    throw RequestError.methodNotFound(method)
++  }
++
+   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
+     // We currently only support ACP protocol version 1.
+     const supportedVersion = 1
+@@ -240,6 +281,9 @@ export class PiAcpAgent implements ACPAgent {
+ 
+     return {
+       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
++      // Advertise the `_session/steering` extension method (additive `_meta`:
++      // merge with any other `_meta` keys, never replace them).
++      _meta: { steering: { supported: true } },
+       agentInfo: {
+         name: pkg.name ?? 'pi-acp',
+         title: 'pi ACP adapter',
+diff --git a/src/acp/session.ts b/src/acp/session.ts
+index 1c97b24..b578b36 100644
+--- a/src/acp/session.ts
++++ b/src/acp/session.ts
+@@ -294,6 +294,12 @@ export class PiAcpSession {
+ 
+   // Current in-flight turn (if any). Additional prompts are queued.
+   private pendingTurn: PendingTurn | null = null
++
++  /** Whether a turn is currently in progress (read by the `_session/steering` extension method). */
++  get hasPendingTurn(): boolean {
++    return this.pendingTurn !== null
++  }
++
+   private readonly turnQueue: QueuedTurn[] = []
+   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
+   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
+diff --git a/src/pi-rpc/process.ts b/src/pi-rpc/process.ts
+index 160cc90..3cd1957 100644
+--- a/src/pi-rpc/process.ts
++++ b/src/pi-rpc/process.ts
+@@ -30,6 +30,7 @@ function stripAnsi(s: string): string {
+ 
+ type PiRpcCommand =
+   | { type: 'prompt'; id?: string; message: string; images?: unknown[] }
++  | { type: 'steer'; id?: string; message: string; images?: unknown[] }
+   | { type: 'abort'; id?: string }
+   | { type: 'get_state'; id?: string }
+   // Model
+@@ -266,6 +267,16 @@ export class PiRpcProcess {
+     if (!res.success) throw new Error(`pi abort failed: ${res.error ?? JSON.stringify(res.data)}`)
+   }
+ 
++  /**
++   * Steer a running turn: deliver `message` (and optional `images`) to the
++   * agent mid-turn, before its next LLM call. No-op if no turn is running;
++   * callers decide idle semantics (see the `_session/steering` ext method).
++   */
++  async steer(message: string, images: unknown[] = []): Promise<void> {
++    const res = await this.request({ type: 'steer', message, images })
++    if (!res.success) throw new Error(`pi steer failed: ${res.error ?? JSON.stringify(res.data)}`)
++  }
++
+   async getState(): Promise<unknown> {
+     const res = await this.request({ type: 'get_state' })
+     if (!res.success) throw new Error(`pi get_state failed: ${res.error ?? JSON.stringify(res.data)}`)
+diff --git a/test/agent-steering.test.ts b/test/agent-steering.test.ts
+new file mode 100644
+index 0000000..8221b5a
+--- /dev/null
++++ b/test/agent-steering.test.ts
+@@ -0,0 +1,122 @@
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { PiAcpAgent } from '../src/acp/agent.js'
++import { PiAcpSession } from '../src/acp/session.js'
++import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from './helpers/fakes.js'
++
++/**
++ * Contract for the `_session/steering` ACP extension method (same method name
++ * as @agentclientprotocol/claude-agent-acp). NOTE: this is unrelated to pi's
++ * `/steering` slash command, which toggles queue delivery mode.
++ */
++function makeAgentWithSession(sessionId = 's-steer') {
++  const conn = new FakeAgentSideConnection()
++  const proc = new FakePiRpcProcess()
++  const session = new PiAcpSession({
++    sessionId,
++    cwd: process.cwd(),
++    mcpServers: [],
++    proc: proc as any,
++    conn: asAgentConn(conn),
++    fileCommands: []
++  })
++
++  const agent = new PiAcpAgent(asAgentConn(conn))
++  // Inject the session so restoreSession() finds it without spawning pi.
++  ;(agent as any).sessions = {
++    maybeGet: (id: string) => (id === sessionId ? session : null)
++  }
++
++  return { agent, proc, session }
++}
++
++test('initialize: advertises _meta.steering.supported = true', async () => {
++  const agent = new PiAcpAgent(asAgentConn(new FakeAgentSideConnection()))
++  const res = await agent.initialize({ protocolVersion: 1 } as any)
++
++  assert.equal((res as any)._meta?.steering?.supported, true)
++})
++
++test('_session/steering: outcome injected when a turn is running', async () => {
++  const { agent, proc, session } = makeAgentWithSession()
++
++  // Start a turn; the fake proc never emits agent_settled, so it stays pending.
++  void session.prompt('first turn')
++  await new Promise(r => setTimeout(r, 0))
++
++  const res = await agent.extMethod('_session/steering', {
++    sessionId: 's-steer',
++    prompt: [{ type: 'text', text: 'vira a plan b' }]
++  })
++
++  assert.deepEqual(res, { outcome: 'injected' })
++  assert.equal(proc.steers.length, 1)
++  assert.equal(proc.steers[0]!.message, 'vira a plan b')
++  assert.deepEqual(proc.steers[0]!.images, [])
++})
++
++test('_session/steering: outcome injected passes images through untouched', async () => {
++  const { agent, proc, session } = makeAgentWithSession()
++
++  void session.prompt('turn with images')
++  await new Promise(r => setTimeout(r, 0))
++
++  const images = [{ type: 'image', mimeType: 'image/png', data: 'aGk=' }]
++  await agent.extMethod('_session/steering', {
++    sessionId: 's-steer',
++    prompt: [{ type: 'text', text: 'mirá esto' }, ...images]
++  })
++
++  assert.equal(proc.steers.length, 1)
++  assert.equal(proc.steers[0]!.message, 'mirá esto')
++  assert.deepEqual(proc.steers[0]!.images, images)
++})
++
++test('_session/steering: outcome promptRequired when idle and client opted in', async () => {
++  const { agent, proc } = makeAgentWithSession()
++
++  const res = await agent.extMethod('_session/steering', {
++    sessionId: 's-steer',
++    prompt: [{ type: 'text', text: 'no hay turno' }],
++    _meta: { steering: { idleBehavior: 'promptRequired' } }
++  })
++
++  assert.deepEqual(res, { outcome: 'promptRequired', reason: 'noRunningTurn' })
++  assert.equal(proc.steers.length, 0)
++  assert.equal(proc.prompts.length, 0) // no turn started
++})
++
++test('_session/steering: outcome startedNewTurn starts a detached prompt when idle', async () => {
++  const { agent, proc } = makeAgentWithSession()
++
++  const res = await agent.extMethod('_session/steering', {
++    sessionId: 's-steer',
++    prompt: [{ type: 'text', text: 'empezá de una' }]
++  })
++
++  // Response must not wait for the turn to finish.
++  assert.deepEqual(res, { outcome: 'startedNewTurn' })
++
++  // Fire-and-forget: give the detached prompt a tick to reach the fake proc.
++  await new Promise(r => setTimeout(r, 0))
++  assert.equal(proc.prompts.length, 1)
++  assert.equal(proc.prompts[0]!.message, 'empezá de una')
++})
++
++test('_session/steering: unknown session returns an ACP error', async () => {
++  const { agent } = makeAgentWithSession()
++
++  await assert.rejects(
++    () => agent.extMethod('_session/steering', { sessionId: 'nope', prompt: [] }),
++    (e: any) => e?.code === -32602 // invalidParams, same as session/prompt on unknown ids
++  )
++})
++
++test('extMethod: unknown method returns methodNotFound', async () => {
++  const { agent } = makeAgentWithSession()
++
++  await assert.rejects(
++    () => agent.extMethod('_session/other', {}),
++    (e: any) => e?.code === -32601
++  )
++})
+diff --git a/test/helpers/fakes.ts b/test/helpers/fakes.ts
+index 583b81b..f6c8651 100644
+--- a/test/helpers/fakes.ts
++++ b/test/helpers/fakes.ts
+@@ -28,6 +28,7 @@ export class FakePiRpcProcess {
+   // spies
+   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
+   readonly extensionUiResponses: unknown[] = []
++  readonly steers: Array<{ message: string; images: unknown[] }> = []
+   abortCount = 0
+   getSessionStatsCount = 0
+ 
+@@ -54,6 +55,10 @@ export class FakePiRpcProcess {
+     this.abortCount += 1
+   }
+ 
++  async steer(message: string, images: unknown[] = []): Promise<void> {
++    this.steers.push({ message, images })
++  }
++
+   async sendExtensionUiResponse(response: unknown): Promise<void> {
+     this.extensionUiResponses.push(response)
+   }
+-- 
+2.41.0.windows.1
+

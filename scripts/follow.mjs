@@ -29,6 +29,7 @@ const node = (script, args, opts = {}) => spawnSync(process.execPath, [join(ROOT
 })
 const lastLine = (s) => s.trim().split('\n').at(-1)
 const sh = (line, opts = {}) => execFileSync(line, { cwd: ROOT, shell: true, encoding: 'utf8', ...opts })
+const fence = (text) => '```\n' + text + '\n```'
 const bridgeFile = () => JSON.parse(readFileSync(join(ROOT, 'bridges', bridgeName, 'bridge.json'), 'utf8'))
 
 function report(title, body) {
@@ -80,41 +81,85 @@ function publishCompat() {
   if (p.status !== 0) report(`${bridgeName}: publishing @gugu-acp/compat failed`, 'compat.json is committed but not published')
 }
 
-// ── 1. upstream ────────────────────────────────────────────────────────────
-const up = JSON.parse(lastLine(node('upstream.mjs', [bridgeName, '--bump']).stdout))
-console.log(`upstream: ${JSON.stringify(up)}`)
-const latestCli = lastLine(node('compat.mjs', ['latest-cli', bridgeName]).stdout)
-console.log(`latest CLI: ${latestCli}`)
+// Bridges with "pairing": false in bridge.json (no CLI-version pairing yet, e.g. pi-acp) skip the
+// CLI install, the ABC check and compat.json: build + upstream tests + our patch tests gate the publish.
+const PAIRING = bridgeFile().pairing !== false
+let latestCliMemo = null
+const latestCli = () => (latestCliMemo ??= lastLine(node('compat.mjs', ['latest-cli', bridgeName]).stdout))
+const compatHas = (version) => JSON.parse(readFileSync(join(ROOT, 'compat.json'), 'utf8'))
+  .bridges[bridgeName]?.releases.some((r) => r.version === version) ?? false
 
-if (up.newer) {
+function onNpm(spec) {
+  try { return sh(`npm view "${spec}" version`, { stdio: ['ignore', 'pipe', 'ignore'] }).trim() !== '' } catch { return false }
+}
+
+function buildOrReport(label) {
   const b = node('build.mjs', [bridgeName], { stdio: ['ignore', 'pipe', 'pipe'] })
   if (b.status !== 0) {
     const why = { 3: 'a patch no longer applies', 4: 'build failed', 5: 'upstream + patch tests failed' }[b.status] ?? `exit ${b.status}`
-    report(`${bridgeName}: upstream ${up.latest} needs attention (${why})`, `\`\`\`\n${(b.stderr || '').slice(-4000)}\n\`\`\``)
+    report(`${bridgeName}: ${label} needs attention (${why})`, fence((b.stderr || '').slice(-4000)))
   }
-  const tarball = lastLine(b.stdout)
-  const cliBin = installCli(latestCli)
-  const r = abc(installBridge(tarball), cliBin)
-  if (!r.ok) report(`${bridgeName}: upstream ${up.latest} fails ABC with ${bridgeFile().cli.name} ${latestCli}`, `\`\`\`\n${r.verdict}\n\`\`\``)
-  if (!DRY) {
-    const p = spawnSync(process.execPath, [join(ROOT, 'scripts', 'publish.mjs'), tarball], { stdio: 'inherit' })
-    if (p.status !== 0) report(`${bridgeName}: publish ${up.version} failed`, tarball)
+  return lastLine(b.stdout)
+}
+
+function abcOrReport(tarball, label) {
+  const cli = latestCli()
+  const r = abc(installBridge(tarball), installCli(cli))
+  if (!r.ok) report(`${bridgeName}: ${label} fails ABC with ${bridgeFile().cli.name} ${cli}`, fence(r.verdict))
+  return cli
+}
+
+function publishOrReport(tarball, version) {
+  if (DRY) { console.log(`dry-run: would publish ${bridgeFile().package}@${version}`); return }
+  const p = spawnSync(process.execPath, [join(ROOT, 'scripts', 'publish.mjs'), tarball], { stdio: 'inherit' })
+  if (p.status !== 0) report(`${bridgeName}: publish ${version} failed`, tarball)
+}
+
+// ── 0. the pinned version is not on npm yet (a new bridge, or a hand-edited bridge.json) ──
+{
+  const cur = bridgeFile()
+  if (!onNpm(`${cur.package}@${cur.version}`)) {
+    const label = `${cur.version} (upstream ${cur.upstream.tag})`
+    const tarball = buildOrReport(label)
+    const cli = PAIRING ? abcOrReport(tarball, label) : null
+    publishOrReport(tarball, cur.version)
+    if (PAIRING && !compatHas(cur.version)) {
+      node('compat.mjs', ['add-release', bridgeName, cur.version, cur.upstream.tag, cli, `abc (CI, upstream ${cur.upstream.tag})`])
+      commitAndPush(`${bridgeName}: ${cur.version} published; verified with ${cur.cli.name} ${cli}`)
+      publishCompat()
+    }
+    process.exit(0)
   }
-  node('compat.mjs', ['add-release', bridgeName, up.version, up.latest, latestCli, `abc (CI, upstream ${up.latest})`])
-  commitAndPush(`${bridgeName}: ${up.version} = upstream ${up.latest} + patches; verified with ${bridgeFile().cli.name} ${latestCli}`)
-  publishCompat()
+}
+
+// ── 1. upstream ────────────────────────────────────────────────────────────
+const up = JSON.parse(lastLine(node('upstream.mjs', [bridgeName, '--bump']).stdout))
+console.log(`upstream: ${JSON.stringify(up)}`)
+
+if (up.newer) {
+  const label = `upstream ${up.latest}`
+  const tarball = buildOrReport(label)
+  const cli = PAIRING ? abcOrReport(tarball, label) : null
+  publishOrReport(tarball, up.version)
+  if (PAIRING) node('compat.mjs', ['add-release', bridgeName, up.version, up.latest, cli, `abc (CI, upstream ${up.latest})`])
+  commitAndPush(`${bridgeName}: ${up.version} = upstream ${up.latest} + patches${PAIRING ? `; verified with ${bridgeFile().cli.name} ${cli}` : ''}`)
+  if (PAIRING) publishCompat()
+  process.exit(0)
+}
+
+if (!PAIRING) {
+  console.log(`up to date: ${bridgeName}@${bridgeFile().version} (upstream ${up.current})`)
   process.exit(0)
 }
 
 // ── 2. new CLI version against our newest release ──────────────────────────
 const newest = JSON.parse(lastLine(node('compat.mjs', ['newest', bridgeName]).stdout))
-if (newest.verified.some((v) => v.cli === latestCli)) {
-  console.log(`up to date: ${bridgeName}@${newest.version} already verified with ${latestCli}`)
+if (newest.verified.some((v) => v.cli === latestCli())) {
+  console.log(`up to date: ${bridgeName}@${newest.version} already verified with ${latestCli()}`)
   process.exit(0)
 }
-const cliBin = installCli(latestCli)
-const r = abc(installBridge(`${bridgeFile().package}@${newest.version}`), cliBin)
-if (!r.ok) report(`${bridgeName}@${newest.version} fails ABC with ${bridgeFile().cli.name} ${latestCli}`, `\`\`\`\n${r.verdict}\n\`\`\``)
-node('compat.mjs', ['record-verified', bridgeName, newest.version, latestCli, 'abc (CI)'])
-commitAndPush(`${bridgeName}@${newest.version}: verified with ${bridgeFile().cli.name} ${latestCli}`)
+const r = abc(installBridge(`${bridgeFile().package}@${newest.version}`), installCli(latestCli()))
+if (!r.ok) report(`${bridgeName}@${newest.version} fails ABC with ${bridgeFile().cli.name} ${latestCli()}`, fence(r.verdict))
+node('compat.mjs', ['record-verified', bridgeName, newest.version, latestCli(), 'abc (CI)'])
+commitAndPush(`${bridgeName}@${newest.version}: verified with ${bridgeFile().cli.name} ${latestCli()}`)
 publishCompat()

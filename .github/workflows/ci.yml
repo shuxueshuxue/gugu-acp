@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        bridge: [claude-agent-acp]
+        bridge: [claude-agent-acp, pi-acp]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
