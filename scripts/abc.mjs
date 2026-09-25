@@ -9,8 +9,9 @@
 //   C  prompt + mid-turn _session/steering, delivery "next" (how Gugu injects group messages)
 //                                                    -> must end; the #6394 bug shows as a timeout here
 //
-// The model comes from the environment the CLI reads (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
-// ANTHROPIC_MODEL for claude). Last stdout line is one JSON verdict. Exit: 0 PASS, 1 FAIL (a turn did
+// The model: ABC_ANTHROPIC_BASE_URL / ABC_ANTHROPIC_AUTH_TOKEN / ABC_ANTHROPIC_MODEL, when set, are handed
+// to the CLI as ANTHROPIC_* (kept under their own names so builds/tests never see them); otherwise the
+// CLI uses whatever it is already logged in to. Last stdout line is one JSON verdict. Exit: 0 PASS, 1 FAIL (a turn did
 // not end or errored), 2 RIG-FAIL (could not start the bridge / session).
 // Origin: acp-repro.mjs from the gugu#6394 handoff.
 import { spawn, execFileSync } from 'node:child_process'
@@ -28,11 +29,21 @@ const t0 = Date.now(); const ts = () => ((Date.now() - t0) / 1000).toFixed(1)
 const log = (...a) => console.log(`[${ts()}s]`, ...a)
 const results = {}
 let done = false
+function modelEnv() {
+  const e = process.env
+  if (!e.ABC_ANTHROPIC_AUTH_TOKEN) return {}
+  const model = e.ABC_ANTHROPIC_MODEL
+  return {
+    ANTHROPIC_BASE_URL: e.ABC_ANTHROPIC_BASE_URL,
+    ANTHROPIC_AUTH_TOKEN: e.ABC_ANTHROPIC_AUTH_TOKEN,
+    ...(model ? { ANTHROPIC_MODEL: model, ANTHROPIC_SMALL_FAST_MODEL: model } : {}),
+  }
+}
 let child
 const verdict = (v, extra = {}) => { done = true; try { child?.kill() } catch {} console.log(JSON.stringify({ verdict: v, cli: CLI, cliVersion, adapter: args.adapter, results, ...extra })); process.exit(v === 'PASS' ? 0 : v === 'FAIL' ? 1 : 2) }
 
 child = spawn(process.execPath, [args.adapter], {
-  cwd: WORK, env: { ...process.env, CLAUDE_CODE_EXECUTABLE: CLI, DISABLE_AUTOUPDATER: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
+  cwd: WORK, env: { ...process.env, ...modelEnv(), CLAUDE_CODE_EXECUTABLE: CLI, DISABLE_AUTOUPDATER: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
 })
 let stderrTail = []
 readline.createInterface({ input: child.stderr }).on('line', (l) => { stderrTail = [...stderrTail.slice(-19), l] })

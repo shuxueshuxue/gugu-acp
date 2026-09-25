@@ -37,8 +37,12 @@ function run(cmd, args, opts = {}) {
   execFileSync(cmd, args, { stdio: ['ignore', 'inherit', 'inherit'], ...opts })
 }
 
+// Upstream tests read provider settings from the environment (e.g. ANTHROPIC_BASE_URL); a build must
+// not depend on whatever the calling shell or CI job happens to export.
+const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ANTHROPIC_|CLAUDE_|ABC_)/.test(k)))
+
 function sh(line, cwd) {
-  execFileSync(line, { cwd, stdio: ['ignore', 'inherit', 'inherit'], shell: true })
+  execFileSync(line, { cwd, stdio: ['ignore', 'inherit', 'inherit'], shell: true, env: cleanEnv })
 }
 
 const opts = parseArgs(process.argv.slice(2))

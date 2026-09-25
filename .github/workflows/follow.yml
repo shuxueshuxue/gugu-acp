@@ -29,10 +29,10 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      ANTHROPIC_BASE_URL: ${{ secrets.ABC_ANTHROPIC_BASE_URL }}
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ABC_ANTHROPIC_AUTH_TOKEN }}
-      ANTHROPIC_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
-      ANTHROPIC_SMALL_FAST_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
+      # Only abc.mjs hands these to the CLI (as ANTHROPIC_*); builds and upstream tests never see them.
+      ABC_ANTHROPIC_BASE_URL: ${{ secrets.ABC_ANTHROPIC_BASE_URL }}
+      ABC_ANTHROPIC_AUTH_TOKEN: ${{ secrets.ABC_ANTHROPIC_AUTH_TOKEN }}
+      ABC_ANTHROPIC_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
