@@ -11,7 +11,7 @@ pi failed to start. Forwarding them keeps the ACP conversation clean
 (quietStartup still hides the synthetic banner) while making the real cause
 visible to the host.
 
-Upstream: none yet.
+Upstream: svkozak/pi-acp#143.
 
 Drop when: upstream forwards pi's stderr/prelude to the adapter stderr.
 ---

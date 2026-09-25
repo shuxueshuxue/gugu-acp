@@ -11,7 +11,7 @@ fell back to the tool name) and marked every replayed call completed, so
 reopened sessions showed tool calls without what ran and without failures
 (Gugu #6020). Keep the arguments by call id and carry isError into status.
 
-Upstream: none yet.
+Upstream: svkozak/pi-acp#144.
 
 Drop when: upstream replays toolCall arguments and failure status.
 ---

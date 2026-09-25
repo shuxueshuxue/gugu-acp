@@ -12,8 +12,7 @@ row of the effort picker on models that support `xhigh`: picking it applies
 `xhigh` clears it. Sessions that never touch UltraCode keep the plain
 `effortLevel` update, so other clients see no change.
 
-Upstream: to be proposed as a general capability (expose Claude's ultracode
-switch to ACP clients); no upstream PR yet.
+Upstream: agentclientprotocol/claude-agent-acp#1176.
 
 Drop when: upstream exposes UltraCode through configOptions (or an
 extension point Gugu can use without patching).

@@ -9,8 +9,7 @@ instead of pre-empting the current generation (`now`). Other clients keep
 the agent-chosen now/later default; only `_meta.steering.delivery: "next"`
 opts in, and any other value is rejected.
 
-Upstream: to be proposed next to the existing `_meta.steering.idleBehavior`
-switch (no upstream PR yet).
+Upstream: agentclientprotocol/claude-agent-acp#1175.
 
 Drop when: upstream accepts a steering delivery option with the same
 semantics.
