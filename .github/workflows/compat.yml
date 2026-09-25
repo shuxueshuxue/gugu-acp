@@ -1,0 +1,24 @@
+name: compat
+# A hand edit of compat.json (e.g. moving a range after a bad release) is republished as
+# @gugu-acp/compat, which Gugu reads at runtime. The follow workflow publishes its own commits
+# itself: pushes made with GITHUB_TOKEN do not trigger other workflows.
+on:
+  push:
+    branches: [main]
+    paths: [compat.json]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/publish-compat.mjs

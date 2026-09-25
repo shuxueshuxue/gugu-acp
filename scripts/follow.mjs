@@ -9,6 +9,7 @@
 // 2. Otherwise: is the CLI's latest version already verified for our newest release?
 //      no -> ABC with that CLI against the published newest release
 //      -> pass: compat record-verified -> commit + push.
+// After a commit, compat.json is republished as @gugu-acp/compat (what Gugu reads at runtime).
 // Anything that fails stops the pass and is reported (an issue in CI, stderr locally); nothing is
 // published or recorded unless every check before it passed. --dry-run skips publish/commit/push.
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -73,6 +74,12 @@ function commitAndPush(message) {
   report(`${bridgeName}: push failed`, message)
 }
 
+function publishCompat() {
+  if (DRY) { console.log('dry-run: would publish @gugu-acp/compat'); return }
+  const p = spawnSync(process.execPath, [join(ROOT, 'scripts', 'publish-compat.mjs')], { cwd: ROOT, stdio: 'inherit' })
+  if (p.status !== 0) report(`${bridgeName}: publishing @gugu-acp/compat failed`, 'compat.json is committed but not published')
+}
+
 // ── 1. upstream ────────────────────────────────────────────────────────────
 const up = JSON.parse(lastLine(node('upstream.mjs', [bridgeName, '--bump']).stdout))
 console.log(`upstream: ${JSON.stringify(up)}`)
@@ -95,6 +102,7 @@ if (up.newer) {
   }
   node('compat.mjs', ['add-release', bridgeName, up.version, up.latest, latestCli, `abc (CI, upstream ${up.latest})`])
   commitAndPush(`${bridgeName}: ${up.version} = upstream ${up.latest} + patches; verified with ${bridgeFile().cli.name} ${latestCli}`)
+  publishCompat()
   process.exit(0)
 }
 
@@ -109,3 +117,4 @@ const r = abc(installBridge(`${bridgeFile().package}@${newest.version}`), cliBin
 if (!r.ok) report(`${bridgeName}@${newest.version} fails ABC with ${bridgeFile().cli.name} ${latestCli}`, `\`\`\`\n${r.verdict}\n\`\`\``)
 node('compat.mjs', ['record-verified', bridgeName, newest.version, latestCli, 'abc (CI)'])
 commitAndPush(`${bridgeName}@${newest.version}: verified with ${bridgeFile().cli.name} ${latestCli}`)
+publishCompat()

@@ -40,6 +40,8 @@ Each patch's commit message states three things: **Why** it is needed, the **Ups
 
 A patch that no longer applies, a failing test or a failing ABC opens an issue and stops; nothing is published or recorded before every check passed.
 
+**How Gugu reads it.** `compat.json` is published as `@gugu-acp/compat` (version `1.0.<commits touching compat.json>`), with the whole table also inlined under `gugu.compat` in its `package.json` — so one packument GET from npm or a mirror (e.g. npmmirror) is enough. The `follow` workflow republishes it after each of its commits; the `compat` workflow does the same for hand edits.
+
 Secrets: `NPM_TOKEN` (publish to `@gugu-acp`), `ABC_ANTHROPIC_BASE_URL` / `ABC_ANTHROPIC_AUTH_TOKEN` and the variable `ABC_ANTHROPIC_MODEL` (the model the CLI talks to during ABC).
 
 ## Local use

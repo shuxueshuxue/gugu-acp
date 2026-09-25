@@ -35,6 +35,8 @@ jobs:
       ABC_ANTHROPIC_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # publish-compat.mjs counts compat.json commits for its version
       - uses: actions/setup-node@v4
         with:
           node-version: 24
