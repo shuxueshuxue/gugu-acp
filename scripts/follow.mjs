@@ -96,7 +96,10 @@ function onNpm(spec) {
 function buildOrReport(label) {
   const b = node('build.mjs', [bridgeName], { stdio: ['ignore', 'pipe', 'pipe'] })
   if (b.status !== 0) {
-    const why = { 3: 'a patch no longer applies', 4: 'build failed', 5: 'upstream + patch tests failed' }[b.status] ?? `exit ${b.status}`
+    const why = {
+      3: 'a patch no longer applies', 4: 'build failed', 5: 'upstream + patch tests failed',
+      6: 'a Gugu contract failed (what Gugu reads from the bridge changed)',
+    }[b.status] ?? `exit ${b.status}`
     report(`${bridgeName}: ${label} needs attention (${why})`, fence((b.stderr || '').slice(-4000)))
   }
   return lastLine(b.stdout)
