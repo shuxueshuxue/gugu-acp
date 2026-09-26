@@ -31,12 +31,12 @@ Upstream: none yet. The in-process cache it extends is upstream's fix for
 Drop when: upstream persists confirmed windows itself, or Claude reports a
 session's context window before its first turn cheaply.
 ---
- src/acp-agent.ts                             |  40 ++++-
- src/context-window-store.ts                  | 107 ++++++++++++
+ src/acp-agent.ts                             |  40 +++-
+ src/context-window-store.ts                  | 107 +++++++++++
  src/tests/acp-agent.test.ts                  |   7 +-
- src/tests/context-window-persistence.test.ts | 173 +++++++++++++++++++
+ src/tests/context-window-persistence.test.ts | 190 +++++++++++++++++++
  src/tests/context-window-store.test.ts       |  76 ++++++++
- 5 files changed, 394 insertions(+), 9 deletions(-)
+ 5 files changed, 411 insertions(+), 9 deletions(-)
  create mode 100644 src/context-window-store.ts
  create mode 100644 src/tests/context-window-persistence.test.ts
  create mode 100644 src/tests/context-window-store.test.ts
@@ -288,10 +288,10 @@ index dfd6001..fbddf1b 100644
    it("task-notification result with max_tokens does not override the user-turn stopReason", async () => {
 diff --git a/src/tests/context-window-persistence.test.ts b/src/tests/context-window-persistence.test.ts
 new file mode 100644
-index 0000000..2597e35
+index 0000000..80daaba
 --- /dev/null
 +++ b/src/tests/context-window-persistence.test.ts
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,190 @@
 +import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 +import * as fs from "node:fs";
 +import * as os from "node:os";
@@ -345,8 +345,8 @@ index 0000000..2597e35
 +}
 +
 +/** Run one turn on a real session: message_start (mid-turn usage), then a result
-+ *  whose modelUsage reports the 1M window. */
-+async function runTurn(agent: ClaudeAcpAgentType, sessionId: string) {
++ *  whose modelUsage reports `window` — the real window Claude confirms. */
++async function runTurn(agent: ClaudeAcpAgentType, sessionId: string, window = 1_000_000) {
 +  const session = agent.sessions[sessionId];
 +  const input = new Pushable<any>();
 +  async function* messages() {
@@ -392,7 +392,7 @@ index 0000000..2597e35
 +          cacheCreationInputTokens: 0,
 +          webSearchRequests: 0,
 +          costUSD: 0.01,
-+          contextWindow: 1_000_000,
++          contextWindow: window,
 +          maxOutputTokens: 64_000,
 +        },
 +      },
@@ -453,6 +453,23 @@ index 0000000..2597e35
 +      expect(update.size).toBe(1_000_000);
 +      expect(update._meta?.["_claude/contextWindowEstimated"]).toBeUndefined();
 +    }
++  });
++
++  it("a seeded window is still checked against every result, and the result wins", async () => {
++    // An earlier process confirmed 1M; the account has since lost the 1M lane.
++    const first = await newAdapterProcess();
++    await runTurn(first.agent, first.sessionId);
++
++    const second = await newAdapterProcess();
++    await runTurn(second.agent, second.sessionId, 200_000);
++    const [midTurn, atResult] = usageUpdates(second.updates);
++    expect(midTurn.size).toBe(1_000_000);
++    expect(atResult.size).toBe(200_000);
++    expect(second.agent.sessions[second.sessionId].contextWindowSize).toBe(200_000);
++
++    // The correction is what the next process starts from.
++    const third = await newAdapterProcess();
++    expect(third.agent.sessions[third.sessionId].contextWindowSize).toBe(200_000);
 +  });
 +
 +  it("without a state dir each process learns the window on its own", async () => {
