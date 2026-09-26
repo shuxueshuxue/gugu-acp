@@ -1,0 +1,552 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 16:05:39 +0800
+Subject: [PATCH] gugu: keep confirmed context windows across adapter processes
+
+Why: until a turn's `result.modelUsage` confirms it, a session's context
+window is guessed from the model's name ("1m" in the id or description, else
+200000). Opus 5.5 under Claude Code 2.1.282 has a native 1M window and ids
+without "1m" (`opus`, `claude-opus-5-5`), so every first turn streams
+`size: 200000` and only the result corrects it to 1M. The bridge already
+learns the confirmed window, but only in process memory; Gugu runs one adapter
+process per session, so every session (and every runtime fork) starts with an
+empty cache and shows the guess (gugu#6552). No cheap source of the real
+window exists before the first result: initialize, supportedModels,
+getSettings, getStatus and system/init do not carry it, and getContextUsage
+holds every other control request (setModel waited 5.6-14.2 s behind it).
+
+This patch
+- keeps the confirmed windows in `$CLAUDE_AGENT_ACP_STATE_DIR/context-windows.json`
+  when the client names that directory (unset: nothing is read or written,
+  the cache stays per-process as upstream). Only SHA-256 hashes of the cache
+  keys are stored, because the keys embed credential env values; logout
+  clears the file with the in-memory cache;
+- marks a `usage_update` whose `size` is still the unconfirmed guess with
+  `_meta["_claude/contextWindowEstimated"]: true`, so a client does not show a
+  guess as the session's limit (ACP requires `size` to be a number).
+
+Upstream: none yet. The in-process cache it extends is upstream's fix for
+#596; this only lets the confirmed windows outlive the process.
+
+Drop when: upstream persists confirmed windows itself, or Claude reports a
+session's context window before its first turn cheaply.
+---
+ src/acp-agent.ts                             |  40 ++++-
+ src/context-window-store.ts                  | 107 ++++++++++++
+ src/tests/acp-agent.test.ts                  |   7 +-
+ src/tests/context-window-persistence.test.ts | 173 +++++++++++++++++++
+ src/tests/context-window-store.test.ts       |  76 ++++++++
+ 5 files changed, 394 insertions(+), 9 deletions(-)
+ create mode 100644 src/context-window-store.ts
+ create mode 100644 src/tests/context-window-persistence.test.ts
+ create mode 100644 src/tests/context-window-store.test.ts
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index ce436ed..19dbcd5 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -167,6 +167,7 @@ import { buildClaudePermissionOptions } from "./permissions/options.js";
+ import { buildClaudePermissionPresentation } from "./permissions/presentation.js";
+ import { decodeClaudePermissionResponse } from "./permissions/response.js";
+ import { SettingsManager } from "./settings.js";
++import { CONTEXT_WINDOW_STATE_DIR_ENV, PersistedContextWindows } from "./context-window-store.js";
+ import { ContextCompactionMetadata } from "./context-compaction-meta.js";
+ import {
+   activeUsageLimitMessage,
+@@ -2847,6 +2848,7 @@ export class ClaudeAcpAgent {
+     // login must not seed sessions under the next. Worst case of clearing is
+     // re-learning on each model's next turn.
+     contextWindowCache.clear();
++    persistedContextWindows.clear();
+ 
+     // For the Claude/Console login methods the credentials live in the native
+     // CLI's store (keychain or config dir), which only the binary can clear.
+@@ -3586,7 +3588,10 @@ export class ClaudeAcpAgent {
+     };
+ 
+     // ACP's usage_update has no model field, so the model the usage belongs
+-    // to rides in `_meta` alongside the other `_claude/*` keys.
++    // to rides in `_meta` alongside the other `_claude/*` keys. So does whether
++    // `size` is a window Claude confirmed for this (backend, model) or only the
++    // name-based guess (see `immediateContextWindow`): ACP requires a number, and
++    // a client must not show a guess as the session's limit.
+     const attachUsageModel = <
+       T extends {
+         sessionUpdate: "usage_update";
+@@ -3597,12 +3602,14 @@ export class ClaudeAcpAgent {
+     >(
+       update: T,
+     ): T => {
+-      if (!lastAssistantModel) return update;
++      const estimated = !session.contextWindowAuthoritative;
++      if (!lastAssistantModel && !estimated) return update;
+       return {
+         ...update,
+         _meta: {
+           ...(update._meta ?? {}),
+-          "_claude/model": lastAssistantModel,
++          ...(lastAssistantModel ? { "_claude/model": lastAssistantModel } : {}),
++          ...(estimated ? { "_claude/contextWindowEstimated": true } : {}),
+         },
+       };
+     };
+@@ -10690,9 +10697,21 @@ function inferContextWindowFromModel(...texts: Array<string | undefined>): numbe
+  *  ahead of an awaited `setModel` — issues #886/#880, regressed in 0.59.0), so
+  *  it can neither beat the first `result` nor be issued cheaply before one.
+  *  Cleared on `logout`: 1M-context entitlement can differ per account/tier, so
+- *  windows learned under one login must not seed sessions under the next. */
++ *  windows learned under one login must not seed sessions under the next.
++ *
++ *  A client that runs one adapter process per session would start every
++ *  session with this map empty; {@link persistedContextWindows} carries the
++ *  confirmed windows across processes when the client names a state dir. */
+ const contextWindowCache = new Map<string, number>();
+ 
++/** The confirmed windows of {@link contextWindowCache}, kept across adapter
++ *  processes in `$CLAUDE_AGENT_ACP_STATE_DIR` (see context-window-store.ts).
++ *  Unset, it holds nothing and the cache is per-process as before. */
++const persistedContextWindows = new PersistedContextWindows(
++  process.env[CONTEXT_WINDOW_STATE_DIR_ENV],
++  (message, error) => console.error(`[context-windows] ${message}`, error ?? ""),
++);
++
+ /** The env vars that determine which LLM backend — and which context lane on
+  *  it — a query's API traffic reaches: endpoint selection (base URLs and the
+  *  Bedrock/Vertex switches with their project/region), routing/beta headers
+@@ -10740,12 +10759,14 @@ function contextWindowCacheKey(providerCacheKey: string, modelId: string): strin
+ function cacheContextWindow(modelKey: string, window: number): void {
+   if (window > 0) {
+     contextWindowCache.set(modelKey, window);
++    persistedContextWindows.set(modelKey, window);
+   }
+ }
+ 
+ /** The context window to report *right now* for a model, with NO IPC on the
+  *  critical path: the cached authoritative value if we've learned it (from a
+- *  prior turn's `result.modelUsage`, this or any session on the same backend),
++ *  prior turn's `result.modelUsage`, this or any session on the same backend —
++ *  in this process, or in any process sharing the persisted state dir),
+  *  else the text heuristic over the model row's identity strings, else the
+  *  default. Derives the cache key itself — `modelInfo?.resolvedModel ?? modelId`,
+  *  the same rule at every seed site — so read keys can't drift from the write
+@@ -10757,9 +10778,12 @@ function immediateContextWindow(
+   modelId: string,
+   modelInfo?: Pick<ModelInfo, "resolvedModel" | "displayName" | "description">,
+ ): { size: number; authoritative: boolean } {
+-  const cached = contextWindowCache.get(
+-    contextWindowCacheKey(providerCacheKey, modelInfo?.resolvedModel ?? modelId),
+-  );
++  const key = contextWindowCacheKey(providerCacheKey, modelInfo?.resolvedModel ?? modelId);
++  let cached = contextWindowCache.get(key);
++  if (cached === undefined) {
++    cached = persistedContextWindows.get(key);
++    if (cached !== undefined) contextWindowCache.set(key, cached);
++  }
+   if (cached !== undefined) return { size: cached, authoritative: true };
+   return {
+     size:
+diff --git a/src/context-window-store.ts b/src/context-window-store.ts
+new file mode 100644
+index 0000000..ad3ac13
+--- /dev/null
++++ b/src/context-window-store.ts
+@@ -0,0 +1,107 @@
++import { createHash } from "node:crypto";
++import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
++import * as path from "node:path";
++
++/**
++ * Where context windows that Claude has confirmed (`result.modelUsage`) outlive
++ * this adapter process.
++ *
++ * The in-memory cache in acp-agent.ts lets a session seed its window from an
++ * earlier turn on the same (backend, model) — but only inside one process. A
++ * client that runs one adapter process per session starts every session with an
++ * empty cache, so every first turn streams the name-based guess instead (200000
++ * for Opus 5.5 under Claude Code 2.1.282: its window is 1M, its ids `opus` /
++ * `claude-opus-5-5` carry no "1m"). Naming a directory here makes the confirmed
++ * windows survive process boundaries. Unset, nothing is read or written.
++ *
++ * Only the hash of each cache key is stored: the keys embed credential env
++ * values (API keys, auth tokens), which must never reach disk.
++ */
++export const CONTEXT_WINDOW_STATE_DIR_ENV = "CLAUDE_AGENT_ACP_STATE_DIR";
++
++const FILE_NAME = "context-windows.json";
++
++type StoredWindows = { version: 1; windows: Record<string, number> };
++
++export class PersistedContextWindows {
++  private readonly file: string | undefined;
++
++  constructor(
++    dir: string | undefined,
++    private readonly onError: (message: string, error?: unknown) => void,
++  ) {
++    this.file = dir?.trim() ? path.join(dir.trim(), FILE_NAME) : undefined;
++  }
++
++  get(cacheKey: string): number | undefined {
++    if (!this.file) return undefined;
++    const window = this.load(this.file)[hashKey(cacheKey)];
++    return typeof window === "number" && window > 0 ? window : undefined;
++  }
++
++  set(cacheKey: string, window: number): void {
++    if (!this.file || !(window > 0)) return;
++    const windows = this.load(this.file);
++    const key = hashKey(cacheKey);
++    if (windows[key] === window) return;
++    windows[key] = window;
++    this.save(this.file, windows);
++  }
++
++  clear(): void {
++    if (!this.file) return;
++    try {
++      rmSync(this.file, { force: true });
++    } catch (error) {
++      this.onError(`could not clear ${this.file}`, error);
++    }
++  }
++
++  /** Read on every call: other adapter processes write the same file. Unreadable or
++   *  malformed content is reported and read as empty — the window then comes from this
++   *  turn's result, exactly as without persistence. A missing file is the first run. */
++  private load(file: string): Record<string, number> {
++    let raw: string;
++    try {
++      raw = readFileSync(file, "utf8");
++    } catch (error) {
++      if ((error as { code?: unknown }).code !== "ENOENT") {
++        this.onError(`could not read ${file}`, error);
++      }
++      return {};
++    }
++    try {
++      const parsed = JSON.parse(raw) as Partial<StoredWindows> | null;
++      if (parsed?.version === 1 && parsed.windows && typeof parsed.windows === "object") {
++        return { ...parsed.windows };
++      }
++      this.onError(`ignoring ${file}: not a version 1 context-window file`);
++    } catch (error) {
++      this.onError(`ignoring ${file}: not valid JSON`, error);
++    }
++    return {};
++  }
++
++  /** Whole-file write through temp + rename, so a reader in another process never sees a
++   *  torn file. Two processes confirming at the same instant can drop one entry; that
++   *  costs one more first-turn guess, never a wrong window. */
++  private save(file: string, windows: Record<string, number>): void {
++    const temp = `${file}.${process.pid}.tmp`;
++    try {
++      mkdirSync(path.dirname(file), { recursive: true });
++      writeFileSync(temp, JSON.stringify({ version: 1, windows } satisfies StoredWindows), "utf8");
++      renameSync(temp, file);
++    } catch (error) {
++      this.onError(`could not write ${file}`, error);
++      try {
++        rmSync(temp, { force: true });
++      } catch {
++        // The write error above is the one worth reporting.
++      }
++    }
++  }
++}
++
++function hashKey(cacheKey: string): string {
++  return createHash("sha256").update(cacheKey).digest("hex");
++}
+diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
+index dfd6001..fbddf1b 100644
+--- a/src/tests/acp-agent.test.ts
++++ b/src/tests/acp-agent.test.ts
+@@ -13352,9 +13352,11 @@ describe("result origin handling", () => {
+ 
+     const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
+     expect(usageUpdate).toBeDefined();
++    // The result carries no modelUsage, so the window stays the unconfirmed guess.
+     expect(usageUpdate.update._meta).toEqual({
+       "_claude/origin": { kind: "channel", server: "acp" },
+       "_claude/model": "claude-sonnet-4-6",
++      "_claude/contextWindowEstimated": true,
+     });
+   });
+ 
+@@ -13370,7 +13372,10 @@ describe("result origin handling", () => {
+ 
+     const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
+     expect(usageUpdate).toBeDefined();
+-    expect(usageUpdate.update._meta).toEqual({ "_claude/model": "claude-sonnet-4-6" });
++    expect(usageUpdate.update._meta).toEqual({
++      "_claude/model": "claude-sonnet-4-6",
++      "_claude/contextWindowEstimated": true,
++    });
+   });
+ 
+   it("task-notification result with max_tokens does not override the user-turn stopReason", async () => {
+diff --git a/src/tests/context-window-persistence.test.ts b/src/tests/context-window-persistence.test.ts
+new file mode 100644
+index 0000000..2597e35
+--- /dev/null
++++ b/src/tests/context-window-persistence.test.ts
+@@ -0,0 +1,173 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import * as fs from "node:fs";
++import * as os from "node:os";
++import * as path from "node:path";
++import { randomUUID } from "node:crypto";
++import type { AcpClient, ClaudeAcpAgent as ClaudeAcpAgentType } from "../acp-agent.js";
++import { CONTEXT_WINDOW_STATE_DIR_ENV } from "../context-window-store.js";
++import { Pushable } from "../utils.js";
++import { wrapQuery } from "./session-doubles.js";
++
++// A model whose id and description carry no "1m", so the name-based guess is the
++// 200000 default while the window Claude reports is 1M (Opus 5.5 under Claude Code
++// 2.1.282 has exactly this shape).
++const MODEL = "claude-opus-5-5";
++
++vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
++  const actual = await vi.importActual<typeof import("@anthropic-ai/claude-agent-sdk")>(
++    "@anthropic-ai/claude-agent-sdk",
++  );
++  const { makeMockQuery } = await import("./helpers.js");
++  return {
++    ...actual,
++    query: () =>
++      makeMockQuery({
++        initializationResult: async () => ({
++          models: [{ value: MODEL, displayName: "Opus 5.5", description: "Most capable" }],
++        }),
++      }),
++  };
++});
++
++vi.mock("../tools.js", async () => {
++  const actual = await vi.importActual<typeof import("../tools.js")>("../tools.js");
++  return { ...actual, registerHookCallback: vi.fn() };
++});
++
++/** A fresh module graph stands in for a fresh adapter process: the in-memory
++ *  window cache starts empty, as it does in every process a client spawns. */
++async function newAdapterProcess() {
++  vi.resetModules();
++  const { ClaudeAcpAgent } = await import("../acp-agent.js");
++  const updates: any[] = [];
++  const client = {
++    sessionUpdate: async (notification: any) => {
++      updates.push(notification);
++    },
++  } as unknown as AcpClient;
++  const agent: ClaudeAcpAgentType = new ClaudeAcpAgent(client, { log: () => {}, error: () => {} });
++  const { sessionId } = await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
++  return { agent, sessionId, updates };
++}
++
++/** Run one turn on a real session: message_start (mid-turn usage), then a result
++ *  whose modelUsage reports the 1M window. */
++async function runTurn(agent: ClaudeAcpAgentType, sessionId: string) {
++  const session = agent.sessions[sessionId];
++  const input = new Pushable<any>();
++  async function* messages() {
++    const { value: userMessage } = await input[Symbol.asyncIterator]().next();
++    yield {
++      type: "user",
++      message: userMessage.message,
++      parent_tool_use_id: null,
++      uuid: userMessage.uuid,
++      session_id: sessionId,
++      isReplay: true,
++    };
++    const usage = {
++      input_tokens: 40_000,
++      output_tokens: 10,
++      cache_read_input_tokens: 0,
++      cache_creation_input_tokens: 0,
++    };
++    yield {
++      type: "stream_event",
++      parent_tool_use_id: null,
++      uuid: randomUUID(),
++      session_id: sessionId,
++      event: { type: "message_start", message: { model: MODEL, usage } },
++    };
++    yield {
++      type: "result",
++      subtype: "success",
++      stop_reason: "end_turn",
++      is_error: false,
++      result: "",
++      errors: [],
++      duration_ms: 0,
++      duration_api_ms: 0,
++      num_turns: 1,
++      total_cost_usd: 0.01,
++      usage,
++      modelUsage: {
++        [MODEL]: {
++          inputTokens: 40_000,
++          outputTokens: 10,
++          cacheReadInputTokens: 0,
++          cacheCreationInputTokens: 0,
++          webSearchRequests: 0,
++          costUSD: 0.01,
++          contextWindow: 1_000_000,
++          maxOutputTokens: 64_000,
++        },
++      },
++      permission_denials: [],
++      uuid: randomUUID(),
++      session_id: sessionId,
++    };
++    yield { type: "system", subtype: "session_state_changed", state: "idle" };
++  }
++  // Keep the session-level calls newSession() scheduled on the original query answerable.
++  session.query = Object.assign(wrapQuery(messages()), {
++    supportedCommands: async () => [],
++    mcpServerStatus: async () => [],
++  });
++  session.input = input;
++  await agent.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
++}
++
++const usageUpdates = (updates: any[]) =>
++  updates.filter((u) => u.update?.sessionUpdate === "usage_update").map((u) => u.update);
++
++describe("context windows across adapter processes", () => {
++  let stateDir: string;
++  let previous: string | undefined;
++
++  beforeEach(() => {
++    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-state-"));
++    previous = process.env[CONTEXT_WINDOW_STATE_DIR_ENV];
++    process.env[CONTEXT_WINDOW_STATE_DIR_ENV] = stateDir;
++  });
++
++  afterEach(() => {
++    if (previous === undefined) delete process.env[CONTEXT_WINDOW_STATE_DIR_ENV];
++    else process.env[CONTEXT_WINDOW_STATE_DIR_ENV] = previous;
++    fs.rmSync(stateDir, { recursive: true, force: true });
++  });
++
++  it("marks the guessed window until Claude confirms it", async () => {
++    const first = await newAdapterProcess();
++    await runTurn(first.agent, first.sessionId);
++
++    const [midTurn, atResult] = usageUpdates(first.updates);
++    expect(midTurn.size).toBe(200_000);
++    expect(midTurn._meta?.["_claude/contextWindowEstimated"]).toBe(true);
++    expect(atResult.size).toBe(1_000_000);
++    expect(atResult._meta?.["_claude/contextWindowEstimated"]).toBeUndefined();
++  });
++
++  it("a later process starts its sessions on the window an earlier one confirmed", async () => {
++    const first = await newAdapterProcess();
++    await runTurn(first.agent, first.sessionId);
++
++    const second = await newAdapterProcess();
++    expect(second.agent.sessions[second.sessionId].contextWindowSize).toBe(1_000_000);
++    await runTurn(second.agent, second.sessionId);
++
++    for (const update of usageUpdates(second.updates)) {
++      expect(update.size).toBe(1_000_000);
++      expect(update._meta?.["_claude/contextWindowEstimated"]).toBeUndefined();
++    }
++  });
++
++  it("without a state dir each process learns the window on its own", async () => {
++    delete process.env[CONTEXT_WINDOW_STATE_DIR_ENV];
++    const first = await newAdapterProcess();
++    await runTurn(first.agent, first.sessionId);
++
++    const second = await newAdapterProcess();
++    expect(second.agent.sessions[second.sessionId].contextWindowSize).toBe(200_000);
++    expect(fs.readdirSync(stateDir)).toEqual([]);
++  });
++});
+diff --git a/src/tests/context-window-store.test.ts b/src/tests/context-window-store.test.ts
+new file mode 100644
+index 0000000..9b14fff
+--- /dev/null
++++ b/src/tests/context-window-store.test.ts
+@@ -0,0 +1,76 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import * as fs from "node:fs";
++import * as os from "node:os";
++import * as path from "node:path";
++import { PersistedContextWindows } from "../context-window-store.js";
++
++describe("PersistedContextWindows", () => {
++  let dir: string;
++  const file = () => path.join(dir, "context-windows.json");
++
++  beforeEach(() => {
++    dir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-context-windows-"));
++  });
++
++  afterEach(() => {
++    fs.rmSync(dir, { recursive: true, force: true });
++  });
++
++  it("carries a confirmed window from one process's store to another's", () => {
++    const writer = new PersistedContextWindows(dir, vi.fn());
++    writer.set("backend\0claude-opus-5-5", 1_000_000);
++
++    const reader = new PersistedContextWindows(dir, vi.fn());
++    expect(reader.get("backend\0claude-opus-5-5")).toBe(1_000_000);
++    expect(reader.get("backend\0claude-sonnet-5")).toBeUndefined();
++  });
++
++  it("keeps entries written by other stores sharing the directory", () => {
++    new PersistedContextWindows(dir, vi.fn()).set("a\0m1", 200_000);
++    new PersistedContextWindows(dir, vi.fn()).set("a\0m2", 1_000_000);
++
++    const reader = new PersistedContextWindows(dir, vi.fn());
++    expect(reader.get("a\0m1")).toBe(200_000);
++    expect(reader.get("a\0m2")).toBe(1_000_000);
++  });
++
++  it("writes only hashes of the keys, which embed credentials", () => {
++    new PersistedContextWindows(dir, vi.fn()).set("sk-ant-secret\0claude-opus-5-5", 1_000_000);
++
++    const raw = fs.readFileSync(file(), "utf8");
++    expect(raw).not.toContain("sk-ant-secret");
++    expect(raw).not.toContain("claude-opus-5-5");
++  });
++
++  it("reads and writes nothing without a directory", () => {
++    const store = new PersistedContextWindows(undefined, vi.fn());
++    store.set("a\0m", 1_000_000);
++    expect(store.get("a\0m")).toBeUndefined();
++    expect(fs.readdirSync(dir)).toEqual([]);
++  });
++
++  it("reports a malformed file, reads it as empty, and replaces it on the next write", () => {
++    fs.writeFileSync(file(), "{not json");
++    const onError = vi.fn();
++    const store = new PersistedContextWindows(dir, onError);
++
++    expect(store.get("a\0m")).toBeUndefined();
++    expect(onError).toHaveBeenCalled();
++
++    store.set("a\0m", 1_000_000);
++    expect(new PersistedContextWindows(dir, vi.fn()).get("a\0m")).toBe(1_000_000);
++  });
++
++  it("ignores non-positive windows", () => {
++    const store = new PersistedContextWindows(dir, vi.fn());
++    store.set("a\0m", 0);
++    expect(fs.existsSync(file())).toBe(false);
++  });
++
++  it("clear forgets every window", () => {
++    const store = new PersistedContextWindows(dir, vi.fn());
++    store.set("a\0m", 1_000_000);
++    store.clear();
++    expect(new PersistedContextWindows(dir, vi.fn()).get("a\0m")).toBeUndefined();
++  });
++});
+-- 
+2.41.0.windows.1
+
