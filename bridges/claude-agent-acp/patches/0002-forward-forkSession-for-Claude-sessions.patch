@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Wed, 9 Sep 2026 01:50:37 +0800
+Subject: [PATCH] gugu: forward forkSession for Claude sessions
+
+Why: newSession() receives `_meta.claudeCode.options.forkSession` but drops
+it, so Gugu's runtime fork (resume + fork, nothing written to disk) silently
+degrades into a plain resume of the parent session. ACP's standard
+session/fork is not a substitute: it forks the transcript on disk and does
+not create a live session.
+
+A fork is a new session: like any new session it runs under the id this
+bridge minted for it (`options.sessionId`), which Claude honours with
+--resume + --fork-session (checked with Claude 2.1.282: system/init reports
+exactly that id, and persistSession: false still writes nothing). An earlier
+revision of this patch left the id to Claude and adopted
+`initializationResult.session_id` instead; Claude does not report one there,
+so the bridge kept a random id while every SDK message carried Claude's own
+child id, and the updates keyed by `message.session_id` (rate limits,
+compaction, tool progress) named a session no client knew (gugu#6552).
+
+Upstream: agentclientprotocol/claude-agent-acp#1108 forwards forkSession;
+this patch keeps that part and drops its session-id change.
+
+Drop when: forkSession forwarding is in the upstream tag this fork is
+rebased on.
+---
+ src/acp-agent.ts                         |  5 ++--
+ src/tests/acp-agent.test.ts              | 36 ++++++++++++++++++++++++
+ src/tests/create-session-options.test.ts | 16 +++++++++++
+ 3 files changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index a2acfc1..0b85a41 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -2406,9 +2406,10 @@ export class ClaudeAcpAgent {
+ 
+   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
+     if (this.providerUpdate) await this.providerUpdate;
++    const options = (params._meta as NewSessionMeta | undefined)?.claudeCode?.options;
+     const response = await this.createSession(params, {
+-      // Revisit these meta values once we support resume
+-      resume: (params._meta as NewSessionMeta | undefined)?.claudeCode?.options?.resume,
++      resume: options?.resume,
++      forkSession: options?.forkSession,
+     });
+     // Needs to happen after we return the session
+     setTimeout(() => {
+diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
+index a9f9e87..dfd6001 100644
+--- a/src/tests/acp-agent.test.ts
++++ b/src/tests/acp-agent.test.ts
+@@ -335,6 +335,42 @@ describe("task plan lifecycle", () => {
+   });
+ });
+ 
++describe("Claude fork session metadata", () => {
++  it("forwards forkSession while preserving the SDK persistence option", async () => {
++    const agent = new ClaudeAcpAgent({ sessionUpdate: async () => {} } as unknown as AcpClient, {
++      log: () => {},
++      error: () => {},
++    });
++    const createSession = vi
++      .spyOn(
++        agent as unknown as {
++          createSession: (...args: unknown[]) => Promise<unknown>;
++        },
++        "createSession",
++      )
++      .mockResolvedValue({ sessionId: "child-session" });
++
++    await agent.newSession({
++      cwd: process.cwd(),
++      mcpServers: [],
++      _meta: {
++        claudeCode: {
++          options: {
++            resume: "parent-session",
++            forkSession: true,
++            persistSession: false,
++          },
++        },
++      },
++    } as any);
++
++    expect(createSession).toHaveBeenCalledWith(expect.objectContaining({ cwd: process.cwd() }), {
++      resume: "parent-session",
++      forkSession: true,
++    });
++  });
++});
++
+ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration", () => {
+   let child: ReturnType<typeof spawn>;
+ 
+diff --git a/src/tests/create-session-options.test.ts b/src/tests/create-session-options.test.ts
+index 11f55fa..def3f9c 100644
+--- a/src/tests/create-session-options.test.ts
++++ b/src/tests/create-session-options.test.ts
+@@ -99,6 +99,22 @@ describe("createSession options merging", () => {
+     agent = new ClaudeAcpAgent(createMockClient());
+   });
+ 
++  it("keys a resume + fork session by its own id, like a new session", async () => {
++    const cwd = process.cwd();
++    const { sessionId } = await agent.newSession({
++      cwd,
++      mcpServers: [],
++      _meta: { claudeCode: { options: { resume: "parent-session", forkSession: true } } },
++    });
++
++    expect(sessionId).not.toBe("parent-session");
++    expect(capturedOptions?.resume).toBe("parent-session");
++    expect(capturedOptions?.forkSession).toBe(true);
++    // The SDK must run the fork under the id ACP clients address it by; otherwise every
++    // update keyed by the SDK message's session_id names a session the client never saw.
++    expect(capturedOptions?.sessionId).toBe(sessionId);
++  });
++
+   for (const method of ["resumeSession", "loadSession"] as const) {
+     for (const limit of ["maxTurns", "maxBudgetUsd"] as const) {
+       it(`${method} applies added, tightened and removed ${limit} to the SDK query`, async () => {
+-- 
+2.41.0.windows.1
+
