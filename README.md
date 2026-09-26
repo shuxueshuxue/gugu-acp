@@ -11,9 +11,11 @@ bridges/<name>/
   bridge.json     our package name + version, the upstream repo/tag/commit we build from, the CLI it drives
                   ("pairing": false = no CLI-version pairing yet: no ABC, no compat.json entry)
   patches/*.patch our changes, as `git format-patch` files applied with `git am -3` on the upstream tag
+  contracts/*.test.mjs  what Gugu itself reads from the bridge (e.g. the AskUserQuestion form, gugu#6565),
+                  run with `node --test` against the built dist/ after upstream's tests
 compat.json       which of our releases serves which CLI version (see below)
 scripts/          build · abc · publish · upstream · compat · follow
-.github/workflows ci (patches apply + build + tests) · follow (unattended upstream/CLI tracking)
+.github/workflows ci (patches apply + build + tests + contracts) · follow (unattended upstream/CLI tracking)
 ```
 
 One repo for all bridges, Electron-style: Electron does not fork Chromium, it keeps `patches/` and applies them to a pinned Chromium ([electron/docs/development/patches.md](https://github.com/electron/electron/blob/main/docs/development/patches.md)).
@@ -38,10 +40,10 @@ Each patch's commit message states three things: **Why** it is needed, the **Ups
 
 ## Automation (`follow` workflow, every 6 hours)
 
-1. Upstream published a newer `vX.Y.Z` → apply patches, build, run upstream's tests, run ABC with the CLI's latest version → publish `@gugu-acp/<name>@<next minor>` → add a release to `compat.json` → commit.
+1. Upstream published a newer `vX.Y.Z` → apply patches, build, run upstream's tests and our contract tests, run ABC with the CLI's latest version → publish `@gugu-acp/<name>@<next minor>` → add a release to `compat.json` → commit.
 2. Otherwise, the CLI published a version not yet verified for our newest release → run ABC with it → record it as verified → commit.
 
-A patch that no longer applies, a failing test or a failing ABC opens an issue and stops; nothing is published or recorded before every check passed.
+A patch that no longer applies, a failing test, a failing contract or a failing ABC opens an issue and stops; nothing is published or recorded before every check passed. A failing contract means a shape Gugu reads changed upstream: update Gugu's reader first, then the contract.
 
 **How Gugu reads it.** `compat.json` is published as `@gugu-acp/compat` (version `1.0.<commits touching compat.json>`), with the whole table also inlined under `gugu.compat` in its `package.json` — so one packument GET from npm or a mirror (e.g. npmmirror) is enough. The `follow` workflow republishes it after each of its commits; the `compat` workflow does the same for hand edits.
 

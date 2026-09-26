@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // Build one bridge: clone upstream at the pinned tag, apply our patches with a three-way `git am`,
-// build, run the upstream test suite (which also carries our patch tests), then stamp and pack it
-// as the @gugu-acp package.
+// build, run the upstream test suite (which also carries our patch tests), run the Gugu contract
+// tests in bridges/<bridge>/contracts/ against the built dist/, then stamp and pack it as the
+// @gugu-acp package.
 //
 //   node scripts/build.mjs <bridge> [--tag <upstream tag>] [--version <x.y.z>] [--skip-tests]
 //
 // Prints the packed tarball path as the last stdout line. Exit codes: 0 ok, 3 a patch does not
-// apply, 4 build failed, 5 tests failed, 2 bad input. Every failure names the step.
+// apply, 4 build failed, 5 tests failed, 6 a Gugu contract failed, 2 bad input. Every failure names
+// the step.
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -86,6 +88,19 @@ if (opts.skipTests) {
 } else {
   console.log('== test')
   try { for (const line of bridge.test) sh(line, src) } catch { fail(5, 'test', bridge.test.join(' && ')) }
+
+  // What Gugu itself reads from the bridge (e.g. the AskUserQuestion form, gugu#6565). Upstream's tests
+  // cannot know about it, and a release that changes it would reach users through compat.json.
+  const contractDir = join(bridgeDir, 'contracts')
+  const contracts = existsSync(contractDir) ? readdirSync(contractDir).filter((f) => f.endsWith('.test.mjs')).sort() : []
+  if (contracts.length > 0) {
+    console.log(`== gugu contracts (${contracts.join(', ')})`)
+    try {
+      execFileSync(process.execPath, ['--test', ...contracts.map((f) => join(contractDir, f))], {
+        cwd: ROOT, stdio: ['ignore', 'inherit', 'inherit'], env: { ...cleanEnv, GUGU_ACP_BUILT: src },
+      })
+    } catch { fail(6, 'contracts', `bridges/${opts.bridge}/contracts: ${contracts.join(', ')}`) }
+  }
 }
 
 console.log(`== stamp ${bridge.package}@${version}`)
