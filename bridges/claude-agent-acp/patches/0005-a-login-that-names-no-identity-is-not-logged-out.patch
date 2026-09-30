@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
-Date: Wed, 30 Sep 2026 12:01:16 +0800
+Date: Wed, 30 Sep 2026 16:04:20 +0800
 Subject: [PATCH] gugu: a login that names no identity is not "logged out"
 
 Why: `claude auth status --json` for a bearer token, `ANTHROPIC_AUTH_TOKEN`
@@ -15,59 +15,34 @@ away the model catalog session/new had just returned (gugu#6857).
 The module already rules that an empty read is no information, never `none`
 (`fromAccountInfo`); the CLI mapper now follows the same rule. Such a read
 returns undefined and nothing is pushed, while a real logged-out read
-(`loggedIn: false`) still pushes `none`. The probe notes the case once
-instead of logging it as unparseable output.
+(`loggedIn: false`) still pushes `none`. The probe's log line no longer
+calls such a read unparseable output.
 
 Upstream: none yet.
 
 Drop when: upstream stops mapping a logged-in CLI read without a plan or a
 key source to `none`.
 ---
- src/acp-agent.ts              | 13 ++++++++++++-
- src/auth-status.ts            | 26 ++++++++++++++++++++++----
+ src/acp-agent.ts              |  2 +-
+ src/auth-status.ts            | 13 +++++++++----
  src/tests/auth-status.test.ts | 19 +++++++++++++++++++
- 3 files changed, 53 insertions(+), 5 deletions(-)
+ 3 files changed, 29 insertions(+), 5 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 19dbcd5..cdcc861 100644
+index 19dbcd5..5942e6c 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -128,6 +128,7 @@ import {
-   type AuthStatus,
-   type AuthStatusKind,
-   authStatusCapability,
-+  cliStatusLoggedIn,
-   fromAccountInfo,
-   fromCliStatus,
-   gatewayAuthStatus,
-@@ -2159,6 +2160,9 @@ export class ClaudeAcpAgent {
-   /** Same, for the "the CLI probe timed out" warning: a wedged CLI stays wedged
-    *  and would otherwise warn once per probe, i.e. once per user prompt. */
-   private loggedProbeTimeout = false;
-+  /** Same, for the "CLI is logged in but names no identity" note (token auth):
-+   *  every prompt re-reads the store, and every read says the same. */
-+  private loggedUnattributedLogin = false;
-   /** Grace period before a `session/cancel` forces a wedged prompt loop to
-    *  return "cancelled". See {@link DEFAULT_FORCE_CANCEL_GRACE_MS}. Mutable so
-    *  tests can shrink it. */
-@@ -2664,7 +2668,14 @@ export class ClaudeAcpAgent {
+@@ -2664,7 +2664,7 @@ export class ClaudeAcpAgent {
      }
      const status = fromCliStatus(stdout);
      if (!status) {
 -      this.logger.error("claude auth status returned unparseable output");
-+      if (!cliStatusLoggedIn(stdout)) {
-+        this.logger.error("claude auth status returned unparseable output");
-+      } else if (!this.loggedUnattributedLogin) {
-+        this.loggedUnattributedLogin = true;
-+        this.logger.log(
-+          "[authStatus] the CLI is logged in without naming an identity; nothing to report",
-+        );
-+      }
++      this.logger.error("claude auth status named no identity");
        return undefined;
      }
      if (epoch !== this.authEpoch) {
 diff --git a/src/auth-status.ts b/src/auth-status.ts
-index 3922db0..44ad091 100644
+index 3922db0..1021e0d 100644
 --- a/src/auth-status.ts
 +++ b/src/auth-status.ts
 @@ -176,8 +176,9 @@ export function fromAccountInfo(account: AccountInfo | undefined): AuthStatus |
@@ -82,27 +57,7 @@ index 3922db0..44ad091 100644
  export function fromCliStatus(stdout: string): AuthStatus | undefined {
    let parsed: unknown;
    try {
-@@ -208,6 +209,19 @@ export function fromCliStatus(stdout: string): AuthStatus | undefined {
-   });
- }
- 
-+/** Does this `claude auth status --json` output say the CLI is logged in? Tells
-+ *  a login that names no identity apart from output that could not be read. */
-+export function cliStatusLoggedIn(stdout: string): boolean {
-+  try {
-+    const parsed: unknown = JSON.parse(stdout);
-+    return Boolean(
-+      parsed && typeof parsed === "object" && (parsed as CliAuthStatus).loggedIn === true,
-+    );
-+  } catch {
-+    return false;
-+  }
-+}
-+
- /** Single mapping table shared by both sources; see the `kind`/`label` table in
-  *  `extension-authstatus-meta.md`. Order matters: a 3P backend or a gateway
-  *  decides the kind before any firstParty identity fields are considered, and
-@@ -224,7 +238,7 @@ function mapAuthFields(fields: {
+@@ -224,7 +225,7 @@ function mapAuthFields(fields: {
    apiKeySource?: string;
    email?: string;
    organization?: string;
@@ -111,7 +66,7 @@ index 3922db0..44ad091 100644
    const { apiProvider, subscriptionType, apiKeySource, email, organization } = fields;
  
    if (apiProvider === "gateway") {
-@@ -256,7 +270,11 @@ function mapAuthFields(fields: {
+@@ -256,7 +257,11 @@ function mapAuthFields(fields: {
        account,
      };
    }
