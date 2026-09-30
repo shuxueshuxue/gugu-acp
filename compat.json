@@ -7,61 +7,30 @@
       "cli": "claude",
       "releases": [
         {
-          "version": "1.0.0",
-          "upstreamTag": "v0.81.1",
-          "cliFrom": "2.1.278",
+          "version": "1.1.2",
+          "upstreamTag": "v0.81.2",
+          "cliFrom": "2.1.267",
           "verified": [
             {
+              "cli": "2.1.267",
+              "at": "2026-10-01",
+              "how": "abc (mac1, published 1.1.2, model through an ANTHROPIC_AUTH_TOKEN relay)"
+            },
+            {
+              "cli": "2.1.270",
+              "at": "2026-10-01",
+              "how": "abc (mac1, published 1.1.2, model through an ANTHROPIC_AUTH_TOKEN relay)"
+            },
+            {
               "cli": "2.1.278",
-              "at": "2026-09-24",
-              "how": "abc (acp-repro A/B/C, Windows, build = patches on v0.81.1)"
+              "at": "2026-10-01",
+              "how": "abc (mac1, published 1.1.2, model through an ANTHROPIC_AUTH_TOKEN relay)"
             },
             {
               "cli": "2.1.281",
-              "at": "2026-09-25",
-              "how": "product A/B on mac1, gugu#6449 vs dev (evidence: gugu-base evidence/2026-09-25-6394-claude-bridge-ab)"
-            }
-          ]
-        },
-        {
-          "version": "1.1.0",
-          "upstreamTag": "v0.81.2",
-          "cliFrom": "2.1.282",
-          "verified": [
-            {
-              "cli": "2.1.282",
-              "at": "2026-09-25",
-              "how": "abc (CI, upstream v0.81.2)"
+              "at": "2026-10-01",
+              "how": "abc (mac1, published 1.1.2, model through an ANTHROPIC_AUTH_TOKEN relay)"
             },
-            {
-              "cli": "2.1.283",
-              "at": "2026-09-26",
-              "how": "abc (CI)"
-            }
-          ]
-        },
-        {
-          "version": "1.1.1",
-          "upstreamTag": "v0.81.2",
-          "cliFrom": "2.1.282",
-          "verified": [
-            {
-              "cli": "2.1.282",
-              "at": "2026-09-26",
-              "how": "abc (Windows, build = patches on v0.81.2) + product A/B on Windows, gugu#6552"
-            },
-            {
-              "cli": "2.1.283",
-              "at": "2026-09-26",
-              "how": "abc (CI)"
-            }
-          ]
-        },
-        {
-          "version": "1.1.2",
-          "upstreamTag": "v0.81.2",
-          "cliFrom": "2.1.282",
-          "verified": [
             {
               "cli": "2.1.282",
               "at": "2026-09-30",
