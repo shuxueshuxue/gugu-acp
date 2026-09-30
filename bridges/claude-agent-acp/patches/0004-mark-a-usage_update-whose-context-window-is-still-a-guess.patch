@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
-Date: Thu, 1 Oct 2026 04:48:56 +0800
+Date: Thu, 1 Oct 2026 04:52:59 +0800
 Subject: [PATCH] gugu: mark a usage_update whose context window is still a
  guess
 
@@ -23,9 +23,9 @@ Upstream: none yet.
 
 Drop when: upstream reports on usage_update whether `size` is confirmed.
 ---
- src/acp-agent.ts            | 11 ++++--
- src/tests/acp-agent.test.ts | 73 ++++++++++++++++++++++++++++++++++++-
- 2 files changed, 80 insertions(+), 4 deletions(-)
+ src/acp-agent.ts            | 11 +++--
+ src/tests/acp-agent.test.ts | 90 ++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 97 insertions(+), 4 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
 index f10c8b5..2d4c005 100644
@@ -61,10 +61,10 @@ index f10c8b5..2d4c005 100644
        };
      };
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index e237076..441b644 100644
+index e237076..20bd39c 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -10535,6 +10535,72 @@ describe("usage_update computation", () => {
+@@ -10535,6 +10535,89 @@ describe("usage_update computation", () => {
      expect(usageUpdates[1].update.cost).toBeDefined();
    });
  
@@ -120,6 +120,20 @@ index e237076..441b644 100644
 +          cache_creation_input_tokens: 100,
 +        },
 +      }),
++      createResultMessageWithModel({
++        modelUsage: {
++          "claude-opus-4-20250514": {
++            inputTokens: 1000,
++            outputTokens: 500,
++            cacheReadInputTokens: 200,
++            cacheCreationInputTokens: 100,
++            webSearchRequests: 0,
++            costUSD: 0.01,
++            contextWindow: 1000000,
++            maxOutputTokens: 16384,
++          },
++        },
++      }),
 +      { type: "system", subtype: "session_state_changed", state: "idle" },
 +    ]);
 +    agent.sessions["test-session"].contextWindowSize = 1000000;
@@ -127,17 +141,20 @@ index e237076..441b644 100644
 +
 +    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
 +
-+    const [midStream] = updates
++    const usage = updates
 +      .filter((u: any) => u.update?.sessionUpdate === "usage_update")
 +      .map((u: any) => u.update);
-+    expect(midStream.size).toBe(1000000);
-+    expect(midStream._meta?.["_claude/contextWindowEstimated"]).toBeUndefined();
++    expect(usage).toHaveLength(2);
++    for (const update of usage) {
++      expect(update.size).toBe(1000000);
++      expect(update._meta?.["_claude/contextWindowEstimated"]).toBeUndefined();
++    }
 +  });
 +
    it("includes the effective model id on usage_update notifications", async () => {
      const { agent, updates } = createMockAgentWithCapture();
      injectSession(agent, [
-@@ -13981,9 +14047,11 @@ describe("result origin handling", () => {
+@@ -13981,9 +14064,11 @@ describe("result origin handling", () => {
  
      const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
      expect(usageUpdate).toBeDefined();
@@ -149,7 +166,7 @@ index e237076..441b644 100644
      });
    });
  
-@@ -13999,7 +14067,10 @@ describe("result origin handling", () => {
+@@ -13999,7 +14084,10 @@ describe("result origin handling", () => {
  
      const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
      expect(usageUpdate).toBeDefined();
