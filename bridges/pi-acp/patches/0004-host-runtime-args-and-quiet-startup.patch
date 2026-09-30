@@ -1,0 +1,197 @@
+From b5efcae9addd71841ace7b3cb49cd84bf920e8b5 Mon Sep 17 00:00:00 2001
+From: yg2224 <2677406151@qq.com>
+Date: Wed, 30 Sep 2026 11:32:33 +0800
+Subject: [PATCH] gugu: allow host-supplied pi runtime arguments
+
+Why: Gugu must load its own event and MCP extensions while letting pi read the
+user's native configuration root. Rewriting the user's settings or composing a
+shell command would be destructive or unsafe, so expose direct argv injection
+and a settings-free quiet-startup override.
+
+Upstream: svkozak/pi-acp#151.
+
+Drop when: #151 (or an equivalent) is in the upstream tag this is built on.
+
+---
+ README.md                 |  2 +
+ src/acp/pi-settings.ts    |  6 +++
+ src/pi-rpc/command.ts     | 14 ++++++
+ src/pi-rpc/process.ts     |  4 +-
+ test/runtime-args.test.ts | 89 +++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 113 insertions(+), 2 deletions(-)
+ create mode 100644 test/runtime-args.test.ts
+
+diff --git a/README.md b/README.md
+index fa00ebb..8c8828e 100644
+--- a/README.md
++++ b/README.md
+@@ -115,6 +115,8 @@ Point your ACP client to the built `dist/index.js`:
+ 
+ ### Environment variables
+ 
++- `PI_ACP_PI_ARGS` is a JSON array of arguments prepended to the spawned `pi --mode rpc` command. Arguments are passed directly without shell parsing.
++- `PI_ACP_QUIET_STARTUP=0|1` overrides the `quietStartup` setting without modifying pi settings files.
+ - `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
+ - Default: unset/any other value means `false`.
+ - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
+diff --git a/src/acp/pi-settings.ts b/src/acp/pi-settings.ts
+index e0b6cf4..ff4067a 100644
+--- a/src/acp/pi-settings.ts
++++ b/src/acp/pi-settings.ts
+@@ -62,6 +62,12 @@ export function getEnableSkillCommands(cwd: string): boolean {
+  * We use it to decide whether to synthesize + emit our own "startup info" message.
+  */
+ export function getQuietStartup(cwd: string): boolean {
++  if (process.env.PI_ACP_QUIET_STARTUP !== undefined) {
++    if (!['0', '1'].includes(process.env.PI_ACP_QUIET_STARTUP)) {
++      throw new Error('PI_ACP_QUIET_STARTUP must be 0 or 1')
++    }
++    return process.env.PI_ACP_QUIET_STARTUP === '1'
++  }
+   const merged = getMergedSettings(cwd)
+ 
+   const direct = merged.quietStartup
+diff --git a/src/pi-rpc/command.ts b/src/pi-rpc/command.ts
+index 711809b..2581903 100644
+--- a/src/pi-rpc/command.ts
++++ b/src/pi-rpc/command.ts
+@@ -8,6 +8,20 @@ export function getPiCommand(override?: string): string {
+   return override ?? defaultPiCommand()
+ }
+ 
++export function getPiArgs(encoded = process.env.PI_ACP_PI_ARGS): string[] {
++  if (encoded === undefined) return []
++  let args: unknown
++  try {
++    args = JSON.parse(encoded)
++  } catch {
++    throw new Error('PI_ACP_PI_ARGS must be a JSON array of strings')
++  }
++  if (!Array.isArray(args) || !args.every(arg => typeof arg === 'string' && !arg.includes('\0'))) {
++    throw new Error('PI_ACP_PI_ARGS must be a JSON array of strings')
++  }
++  return args
++}
++
+ export function shouldUseShellForPiCommand(cmd: string): boolean {
+   if (platform() !== 'win32') return false
+ 
+diff --git a/src/pi-rpc/process.ts b/src/pi-rpc/process.ts
+index 160cc90..31e6df0 100644
+--- a/src/pi-rpc/process.ts
++++ b/src/pi-rpc/process.ts
+@@ -1,7 +1,7 @@
+ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+ import * as readline from 'node:readline'
+ import crossSpawn from 'cross-spawn'
+-import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
++import { getPiArgs, getPiCommand, shouldUseShellForPiCommand } from './command.js'
+ 
+ export class PiRpcSpawnError extends Error {
+   /** Underlying spawn error code, e.g. ENOENT, EACCES */
+@@ -159,7 +159,7 @@ export class PiRpcProcess {
+     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
+     // Keep extensions + prompt templates enabled because ACP users may rely on them
+     // (e.g. MCP extensions, prompt templates for workflows).
+-    const args = ['--mode', 'rpc', '--no-themes']
++    const args = [...getPiArgs(), '--mode', 'rpc', '--no-themes']
+     if (params.sessionPath) args.push('--session', params.sessionPath)
+ 
+     // Windows cmd launchers need shell escaping; direct executables use native argv.
+diff --git a/test/runtime-args.test.ts b/test/runtime-args.test.ts
+new file mode 100644
+index 0000000..88e1365
+--- /dev/null
++++ b/test/runtime-args.test.ts
+@@ -0,0 +1,89 @@
++import assert from 'node:assert/strict'
++import { mkdtemp, rm, writeFile } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { test } from 'node:test'
++import { getPiArgs } from '../src/pi-rpc/command.js'
++import { getQuietStartup } from '../src/acp/pi-settings.js'
++import { PiRpcProcess } from '../src/pi-rpc/process.js'
++
++test('preserves arguments with spaces and shell metacharacters without shell parsing', () => {
++  const args = ['--extension', '/tmp/config with spaces/extension.ts', '--model', 'custom/a;$(echo test)']
++  assert.deepEqual(getPiArgs(JSON.stringify(args)), args)
++})
++
++for (const encoded of ['', '{}', 'null', '"--model test"', '[1]', '["\\u0000"]']) {
++  test(`rejects malformed PI_ACP_PI_ARGS: ${encoded}`, () => {
++    assert.throws(() => getPiArgs(encoded), /PI_ACP_PI_ARGS must be a JSON array of strings/)
++  })
++}
++
++test('omitting runtime arguments retains the default launch', () => {
++  const previous = process.env.PI_ACP_PI_ARGS
++  try {
++    delete process.env.PI_ACP_PI_ARGS
++    assert.deepEqual(getPiArgs(), [])
++  } finally {
++    if (previous === undefined) delete process.env.PI_ACP_PI_ARGS
++    else process.env.PI_ACP_PI_ARGS = previous
++  }
++})
++
++test('quiet startup can be injected without creating or replacing user settings', () => {
++  const previous = process.env.PI_ACP_QUIET_STARTUP
++  try {
++    process.env.PI_ACP_QUIET_STARTUP = '1'
++    assert.equal(getQuietStartup('/nonexistent/workspace'), true)
++    process.env.PI_ACP_QUIET_STARTUP = '0'
++    assert.equal(getQuietStartup('/nonexistent/workspace'), false)
++    process.env.PI_ACP_QUIET_STARTUP = 'invalid'
++    assert.throws(() => getQuietStartup('/nonexistent/workspace'), /PI_ACP_QUIET_STARTUP/)
++  } finally {
++    if (previous === undefined) delete process.env.PI_ACP_QUIET_STARTUP
++    else process.env.PI_ACP_QUIET_STARTUP = previous
++  }
++})
++
++test('forwards runtime arguments into fresh and resumed RPC subprocesses', async () => {
++  const directory = await mkdtemp(join(tmpdir(), 'pi runtime args '))
++  const script = join(directory, 'fake pi.cjs')
++  const previous = process.env.PI_ACP_PI_ARGS
++  const extension = join(directory, 'extension with spaces.ts')
++  const nativeArgs = [script, '--extension', extension, '--model', 'custom/a;$(echo test)']
++  await writeFile(
++    script,
++    `
++const readline = require('node:readline')
++readline.createInterface({ input: process.stdin }).on('line', line => {
++  const request = JSON.parse(line)
++  process.stdout.write(JSON.stringify({
++    type: 'response', id: request.id, command: request.type, success: true,
++    data: { args: process.argv.slice(2) }
++  }) + '\\n')
++})
++`
++  )
++  try {
++    process.env.PI_ACP_PI_ARGS = JSON.stringify(nativeArgs)
++    for (const sessionPath of [undefined, join(directory, 'existing session.jsonl')]) {
++      const rpc = await PiRpcProcess.spawn({ cwd: directory, piCommand: process.execPath, sessionPath })
++      try {
++        assert.deepEqual(await rpc.getState(), {
++          args: [
++            ...nativeArgs.slice(1),
++            '--mode',
++            'rpc',
++            '--no-themes',
++            ...(sessionPath ? ['--session', sessionPath] : [])
++          ]
++        })
++      } finally {
++        rpc.dispose()
++      }
++    }
++  } finally {
++    if (previous === undefined) delete process.env.PI_ACP_PI_ARGS
++    else process.env.PI_ACP_PI_ARGS = previous
++    await rm(directory, { recursive: true, force: true })
++  }
++})
+-- 
+2.54.0

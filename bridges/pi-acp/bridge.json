@@ -1,6 +1,6 @@
 {
   "package": "@gugu-acp/pi-acp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "upstream": {
     "repo": "https://github.com/svkozak/pi-acp",
     "package": "pi-acp",
