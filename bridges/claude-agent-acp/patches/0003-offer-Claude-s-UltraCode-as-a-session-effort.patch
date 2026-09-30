@@ -1,7 +1,7 @@
-From 0095f01f40defaa9266e5f24af3baa141344093a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <shuxue@protonmail.com>
 Date: Thu, 24 Sep 2026 15:34:32 +0800
-Subject: [PATCH 3/3] gugu: offer Claude's UltraCode as a session effort
+Subject: [PATCH] gugu: offer Claude's UltraCode as a session effort
 
 Why: UltraCode (xhigh effort plus standing dynamic-workflow orchestration) is
 a session flag in Claude Code (`ultracode` in flag settings), not an
@@ -25,10 +25,10 @@ extension point Gugu can use without patching).
  create mode 100644 src/tests/ultracode-effort.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 4585ab8..cb89141 100644
+index 04ddc8b..f10c8b5 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -262,7 +262,8 @@ import {
+@@ -273,7 +273,8 @@ import {
    EFFORT_CONFIG_ID,
    mergeEffortSettings,
    settingsEffortForModel,
@@ -38,7 +38,7 @@ index 4585ab8..cb89141 100644
  } from "./session-effort.js";
  
  export { EFFORT_CONFIG_ID, settingsEffortForModel } from "./session-effort.js";
-@@ -7846,9 +7847,7 @@ export class ClaudeAcpAgent {
+@@ -8114,9 +8115,7 @@ export class ClaudeAcpAgent {
            ? currentEffort
            : pinnedEffort);
        const effortPinnedForNewModel =
@@ -49,7 +49,7 @@ index 4585ab8..cb89141 100644
        const seedEffort = effortPinnedForNewModel
          ? pinnedEffort
          : settingsEffortForModel(
-@@ -7894,14 +7893,14 @@ export class ClaudeAcpAgent {
+@@ -8162,14 +8161,14 @@ export class ClaudeAcpAgent {
          const newEffort =
            typeof newEffortOpt?.currentValue === "string" ? newEffortOpt.currentValue : undefined;
          try {
@@ -72,7 +72,7 @@ index 4585ab8..cb89141 100644
            session.effortPinnedLevel = effortPinnedForNewModel ? pinnedEffort : undefined;
            session.appliedEffortLevel =
              useRecommendedValue && newEffort !== "default" ? newEffort : undefined;
-@@ -7953,9 +7952,12 @@ export class ClaudeAcpAgent {
+@@ -8223,9 +8222,12 @@ export class ClaudeAcpAgent {
      } else if (configId === EFFORT_CONFIG_ID) {
        // Apply first so a rejected control request cannot leave the displayed
        // value ahead of the SDK flag layer.
@@ -88,14 +88,14 @@ index 4585ab8..cb89141 100644
        session.configOptions = session.configOptions.map((o) =>
          o.id === configId && typeof o.currentValue === "string" ? { ...o, currentValue: value } : o,
        );
-@@ -8789,7 +8791,7 @@ export class ClaudeAcpAgent {
+@@ -9057,7 +9059,7 @@ export class ClaudeAcpAgent {
        );
        const initialEffort = configOptions.find((option) => option.id === EFFORT_CONFIG_ID);
        if (useRecommendedValue && typeof initialEffort?.currentValue === "string") {
 -        await q.applyFlagSettings({ effortLevel: toSdkEffortLevel(initialEffort.currentValue) });
 +        await q.applyFlagSettings(effortFlagSettings(initialEffort.currentValue, undefined));
        }
-       // Seed the context window without extra IPC. The cached authoritative
+       // Seed the context window without awaited IPC. The cached authoritative
        // window from a prior turn wins (`result.modelUsage`, cross-session),
 diff --git a/src/session-effort.ts b/src/session-effort.ts
 index 926168e..eaa43df 100644
@@ -173,7 +173,7 @@ index 926168e..eaa43df 100644
      currentEffortLevel && includes(currentEffortLevel)
        ? currentEffortLevel
 diff --git a/src/tests/session-config-options.test.ts b/src/tests/session-config-options.test.ts
-index 0199d0a..d598a32 100644
+index d6fa510..9cf88c9 100644
 --- a/src/tests/session-config-options.test.ts
 +++ b/src/tests/session-config-options.test.ts
 @@ -554,6 +554,20 @@ describe("session config options", () => {
@@ -286,6 +286,3 @@ index 0000000..91d2bf4
 +    ).toBe(ULTRACODE_EFFORT_ID);
 +  });
 +});
--- 
-2.41.0.windows.1
-

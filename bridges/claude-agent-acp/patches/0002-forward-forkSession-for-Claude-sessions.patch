@@ -31,10 +31,10 @@ rebased on.
  3 files changed, 55 insertions(+), 2 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index a2acfc1..0b85a41 100644
+index c75b994..04ddc8b 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -2406,9 +2406,10 @@ export class ClaudeAcpAgent {
+@@ -2557,9 +2557,10 @@ export class ClaudeAcpAgent {
  
    async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
      if (this.providerUpdate) await this.providerUpdate;
@@ -48,10 +48,10 @@ index a2acfc1..0b85a41 100644
      // Needs to happen after we return the session
      setTimeout(() => {
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index a9f9e87..dfd6001 100644
+index 164ce22..e237076 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -335,6 +335,42 @@ describe("task plan lifecycle", () => {
+@@ -349,6 +349,42 @@ describe("task plan lifecycle", () => {
    });
  });
  
@@ -95,7 +95,7 @@ index a9f9e87..dfd6001 100644
    let child: ReturnType<typeof spawn>;
  
 diff --git a/src/tests/create-session-options.test.ts b/src/tests/create-session-options.test.ts
-index 11f55fa..def3f9c 100644
+index c51620c..abd9243 100644
 --- a/src/tests/create-session-options.test.ts
 +++ b/src/tests/create-session-options.test.ts
 @@ -99,6 +99,22 @@ describe("createSession options merging", () => {
@@ -121,6 +121,3 @@ index 11f55fa..def3f9c 100644
    for (const method of ["resumeSession", "loadSession"] as const) {
      for (const limit of ["maxTurns", "maxBudgetUsd"] as const) {
        it(`${method} applies added, tightened and removed ${limit} to the SDK query`, async () => {
--- 
-2.41.0.windows.1
-
