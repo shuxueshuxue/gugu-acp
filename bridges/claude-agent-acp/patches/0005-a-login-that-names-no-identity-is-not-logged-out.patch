@@ -29,10 +29,10 @@ key source to `none`.
  3 files changed, 29 insertions(+), 5 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 19dbcd5..5942e6c 100644
+index 2d4c005..744c6bd 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -2664,7 +2664,7 @@ export class ClaudeAcpAgent {
+@@ -2824,7 +2824,7 @@ export class ClaudeAcpAgent {
      }
      const status = fromCliStatus(stdout);
      if (!status) {

@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 04:48:56 +0800
+Subject: [PATCH] gugu: mark a usage_update whose context window is still a
+ guess
+
+Why: a session's `size` is the name-based guess until the window is
+authoritative, i.e. confirmed by the cross-session cache, a result's
+modelUsage, or (since upstream 0.83) the background getContextUsage. Opus 5.5
+has a native 1M window and ids without "1m", so the guess reads 200000. ACP
+requires `size` to be a number, so the bridge cannot leave it out. Instead it
+marks such an update with `_meta["_claude/contextWindowEstimated"]: true`, and
+Gugu does not draw the guess as the session's limit (gugu#6552).
+
+This replaces the earlier 0004, which also persisted confirmed windows in
+$CLAUDE_AGENT_ACP_STATE_DIR so that a new adapter process would not start on
+the guess. Upstream's background getContextUsage (0.83.0, #1186) now confirms
+the window about 0.5 s after session creation on CLI 2.1.283+. The persistence
+is therefore dropped; only the marker remains, keyed on upstream's own
+`contextWindowAuthoritative`.
+
+Upstream: none yet.
+
+Drop when: upstream reports on usage_update whether `size` is confirmed.
+---
+ src/acp-agent.ts            | 11 ++++--
+ src/tests/acp-agent.test.ts | 73 ++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 80 insertions(+), 4 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index f10c8b5..2d4c005 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -3770,7 +3770,10 @@ export class ClaudeAcpAgent {
+     };
+ 
+     // ACP's usage_update has no model field, so the model the usage belongs
+-    // to rides in `_meta` alongside the other `_claude/*` keys.
++    // to rides in `_meta` alongside the other `_claude/*` keys. So does whether
++    // `size` is still the unconfirmed guess (`contextWindowAuthoritative` false,
++    // see `immediateContextWindow`): ACP requires a number, and a client must not
++    // show a guess as the session's limit.
+     const attachUsageModel = <
+       T extends {
+         sessionUpdate: "usage_update";
+@@ -3781,12 +3784,14 @@ export class ClaudeAcpAgent {
+     >(
+       update: T,
+     ): T => {
+-      if (!lastAssistantModel) return update;
++      const estimated = !session.contextWindowAuthoritative;
++      if (!lastAssistantModel && !estimated) return update;
+       return {
+         ...update,
+         _meta: {
+           ...(update._meta ?? {}),
+-          "_claude/model": lastAssistantModel,
++          ...(lastAssistantModel ? { "_claude/model": lastAssistantModel } : {}),
++          ...(estimated ? { "_claude/contextWindowEstimated": true } : {}),
+         },
+       };
+     };
+diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
+index e237076..441b644 100644
+--- a/src/tests/acp-agent.test.ts
++++ b/src/tests/acp-agent.test.ts
+@@ -10535,6 +10535,72 @@ describe("usage_update computation", () => {
+     expect(usageUpdates[1].update.cost).toBeDefined();
+   });
+ 
++  it("marks the guessed window until a result confirms it", async () => {
++    const { agent, updates } = createMockAgentWithCapture();
++    injectSession(agent, [
++      createStreamEvent("message_start", {
++        model: "claude-opus-4-20250514",
++        usage: {
++          input_tokens: 1000,
++          output_tokens: 500,
++          cache_read_input_tokens: 200,
++          cache_creation_input_tokens: 100,
++        },
++      }),
++      createResultMessageWithModel({
++        modelUsage: {
++          "claude-opus-4-20250514": {
++            inputTokens: 1000,
++            outputTokens: 500,
++            cacheReadInputTokens: 200,
++            cacheCreationInputTokens: 100,
++            webSearchRequests: 0,
++            costUSD: 0.01,
++            contextWindow: 1000000,
++            maxOutputTokens: 16384,
++          },
++        },
++      }),
++      { type: "system", subtype: "session_state_changed", state: "idle" },
++    ]);
++
++    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
++
++    const [midStream, atResult] = updates
++      .filter((u: any) => u.update?.sessionUpdate === "usage_update")
++      .map((u: any) => u.update);
++    expect(midStream.size).toBe(200000);
++    expect(midStream._meta?.["_claude/contextWindowEstimated"]).toBe(true);
++    expect(atResult.size).toBe(1000000);
++    expect(atResult._meta?.["_claude/contextWindowEstimated"]).toBeUndefined();
++  });
++
++  it("does not mark a window that is already authoritative", async () => {
++    const { agent, updates } = createMockAgentWithCapture();
++    injectSession(agent, [
++      createStreamEvent("message_start", {
++        model: "claude-opus-4-20250514",
++        usage: {
++          input_tokens: 1000,
++          output_tokens: 500,
++          cache_read_input_tokens: 200,
++          cache_creation_input_tokens: 100,
++        },
++      }),
++      { type: "system", subtype: "session_state_changed", state: "idle" },
++    ]);
++    agent.sessions["test-session"].contextWindowSize = 1000000;
++    agent.sessions["test-session"].contextWindowAuthoritative = true;
++
++    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
++
++    const [midStream] = updates
++      .filter((u: any) => u.update?.sessionUpdate === "usage_update")
++      .map((u: any) => u.update);
++    expect(midStream.size).toBe(1000000);
++    expect(midStream._meta?.["_claude/contextWindowEstimated"]).toBeUndefined();
++  });
++
+   it("includes the effective model id on usage_update notifications", async () => {
+     const { agent, updates } = createMockAgentWithCapture();
+     injectSession(agent, [
+@@ -13981,9 +14047,11 @@ describe("result origin handling", () => {
+ 
+     const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
+     expect(usageUpdate).toBeDefined();
++    // The result carries no modelUsage, so the window stays the unconfirmed guess.
+     expect(usageUpdate.update._meta).toEqual({
+       "_claude/origin": { kind: "channel", server: "acp" },
+       "_claude/model": "claude-sonnet-4-6",
++      "_claude/contextWindowEstimated": true,
+     });
+   });
+ 
+@@ -13999,7 +14067,10 @@ describe("result origin handling", () => {
+ 
+     const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
+     expect(usageUpdate).toBeDefined();
+-    expect(usageUpdate.update._meta).toEqual({ "_claude/model": "claude-sonnet-4-6" });
++    expect(usageUpdate.update._meta).toEqual({
++      "_claude/model": "claude-sonnet-4-6",
++      "_claude/contextWindowEstimated": true,
++    });
+   });
+ 
+   it("task-notification result with max_tokens does not override the user-turn stopReason", async () => {
