@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 16:04:20 +0800
+Subject: [PATCH] gugu: a login that names no identity is not "logged out"
+
+Why: `claude auth status --json` for a bearer token, `ANTHROPIC_AUTH_TOKEN`
+(with a custom `ANTHROPIC_BASE_URL` or without, in the environment or in the
+settings.json `env`) or `CLAUDE_CODE_OAUTH_TOKEN`, reads
+`{loggedIn: true, authMethod: "oauth_token", apiProvider: "firstParty"}`:
+logged in, no plan, no key source (checked with Claude 2.1.282). The shared
+mapper fell through to `none`, so the bridge pushed "Not logged in" for an
+agent that runs turns fine. Gugu reads `none` as "sign in first" and threw
+away the model catalog session/new had just returned (gugu#6857).
+
+The module already rules that an empty read is no information, never `none`
+(`fromAccountInfo`); the CLI mapper now follows the same rule. Such a read
+returns undefined and nothing is pushed, while a real logged-out read
+(`loggedIn: false`) still pushes `none`. The probe's log line no longer
+calls such a read unparseable output.
+
+Upstream: none yet.
+
+Drop when: upstream stops mapping a logged-in CLI read without a plan or a
+key source to `none`.
+---
+ src/acp-agent.ts              |  2 +-
+ src/auth-status.ts            | 13 +++++++++----
+ src/tests/auth-status.test.ts | 19 +++++++++++++++++++
+ 3 files changed, 29 insertions(+), 5 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index 19dbcd5..5942e6c 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -2664,7 +2664,7 @@ export class ClaudeAcpAgent {
+     }
+     const status = fromCliStatus(stdout);
+     if (!status) {
+-      this.logger.error("claude auth status returned unparseable output");
++      this.logger.error("claude auth status named no identity");
+       return undefined;
+     }
+     if (epoch !== this.authEpoch) {
+diff --git a/src/auth-status.ts b/src/auth-status.ts
+index 3922db0..1021e0d 100644
+--- a/src/auth-status.ts
++++ b/src/auth-status.ts
+@@ -176,8 +176,9 @@ export function fromAccountInfo(account: AccountInfo | undefined): AuthStatus |
+ }
+ 
+ /** Pre-session mapping from `claude auth status --json` stdout. Returns
+- *  `undefined` when the output is not the expected JSON object, so callers can
+- *  report "not known" instead of guessing. */
++ *  `undefined` when the output is not the expected JSON object, or when it
++ *  reports a login without naming an identity, so callers can report "not
++ *  known" instead of guessing. */
+ export function fromCliStatus(stdout: string): AuthStatus | undefined {
+   let parsed: unknown;
+   try {
+@@ -224,7 +225,7 @@ function mapAuthFields(fields: {
+   apiKeySource?: string;
+   email?: string;
+   organization?: string;
+-}): AuthStatus {
++}): AuthStatus | undefined {
+   const { apiProvider, subscriptionType, apiKeySource, email, organization } = fields;
+ 
+   if (apiProvider === "gateway") {
+@@ -256,7 +257,11 @@ function mapAuthFields(fields: {
+       account,
+     };
+   }
+-  return notLoggedInAuthStatus();
++  // Logged in, but nothing says as whom. A bearer token (`ANTHROPIC_AUTH_TOKEN`,
++  // `CLAUDE_CODE_OAUTH_TOKEN`) reads `loggedIn: true, authMethod: "oauth_token"`
++  // with no plan and no key source. Like an `AccountInfo` with no identity
++  // signal, that is no information — never `none`, which claims "logged out".
++  return undefined;
+ }
+ 
+ /** Names the plan with exactly one "Claude". A newer CLI already reports
+diff --git a/src/tests/auth-status.test.ts b/src/tests/auth-status.test.ts
+index c13ff69..edcc200 100644
+--- a/src/tests/auth-status.test.ts
++++ b/src/tests/auth-status.test.ts
+@@ -80,6 +80,14 @@ const CLI_BEDROCK = JSON.stringify({
+   authMethod: "none",
+   apiProvider: "bedrock",
+ });
++/** A bearer token (`ANTHROPIC_AUTH_TOKEN`, e.g. with a custom base URL, or
++ *  `CLAUDE_CODE_OAUTH_TOKEN`): logged in, but no plan and no key source. Both
++ *  variables read exactly like this with Claude Code 2.1.282. */
++const CLI_TOKEN = JSON.stringify({
++  loggedIn: true,
++  authMethod: "oauth_token",
++  apiProvider: "firstParty",
++});
+ 
+ const MOCK_MODELS = [
+   { value: "id", displayName: "name", description: "description", supportsAutoMode: true },
+@@ -258,6 +266,10 @@ describe("auth status mappers", () => {
+     expect(fromCliStatus(CLI_BEDROCK)).toEqual({ kind: "external", label: "AWS Bedrock" });
+   });
+ 
++  it("reports a login that names no identity as not known, never as logged out", () => {
++    expect(fromCliStatus(CLI_TOKEN)).toBeUndefined();
++  });
++
+   it("reports unparseable CLI output as not known", () => {
+     expect(fromCliStatus("")).toBeUndefined();
+     expect(fromCliStatus("Usage: claude auth status")).toBeUndefined();
+@@ -443,6 +455,13 @@ describe("auth status over ACP", () => {
+     expect(agent.currentAuthStatus).toBeUndefined();
+   });
+ 
++  it("pushes nothing for a token login, so a client never reads it as logged out", async () => {
++    statusStdout = CLI_TOKEN;
++    await initialize();
++    expect(updates()).toHaveLength(0);
++    expect(agent.currentAuthStatus).toBeUndefined();
++  });
++
+   it("advertises the extension in agentCapabilities._meta", async () => {
+     const response = await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+     // Presence is the whole advertisement — "this agent pushes its identity".

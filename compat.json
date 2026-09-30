@@ -56,6 +56,23 @@
               "how": "abc (CI)"
             }
           ]
+        },
+        {
+          "version": "1.1.2",
+          "upstreamTag": "v0.81.2",
+          "cliFrom": "2.1.282",
+          "verified": [
+            {
+              "cli": "2.1.282",
+              "at": "2026-09-30",
+              "how": "abc (mac1, build = patches on v0.81.2, model through an ANTHROPIC_AUTH_TOKEN relay)"
+            },
+            {
+              "cli": "2.1.285",
+              "at": "2026-09-30",
+              "how": "abc (mac1, build = patches on v0.81.2, model through an ANTHROPIC_AUTH_TOKEN relay)"
+            }
+          ]
         }
       ]
     }
